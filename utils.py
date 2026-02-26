@@ -177,6 +177,29 @@ def prepare_inpaint_latents(
 # Low-Fidelity Selection (LFS)
 # ---------------------------------------------------------------------------
 
+def _mask_bounding_box(mask: torch.Tensor) -> Tuple[int, int, int, int]:
+    """
+    Return the tight axis-aligned bounding box of the non-zero region in a
+    (1, 1, H, W) or (1, H, W) binary mask tensor.
+
+    Returns (y_min, y_max, x_min, x_max) with inclusive bounds.
+    Falls back to the full image if the mask is entirely zero.
+    """
+    m = mask.squeeze()  # → (H, W)
+    rows = torch.any(m > 0, dim=1)
+    cols = torch.any(m > 0, dim=0)
+
+    if not rows.any():
+        H, W = m.shape
+        return 0, H - 1, 0, W - 1
+
+    y_min = int(rows.nonzero(as_tuple=False)[0].item())
+    y_max = int(rows.nonzero(as_tuple=False)[-1].item())
+    x_min = int(cols.nonzero(as_tuple=False)[0].item())
+    x_max = int(cols.nonzero(as_tuple=False)[-1].item())
+    return y_min, y_max, x_min, x_max
+
+
 def compute_lpips_in_mask(
     lpips_fn,
     generated: torch.Tensor,
@@ -184,20 +207,38 @@ def compute_lpips_in_mask(
     mask: torch.Tensor,
 ) -> float:
     """
-    Compute LPIPS between *generated* and *original* images, restricted to
-    the masked region.
+    Compute LPIPS between *generated* and *original* restricted to the masked
+    region, using a **bounding-box crop** rather than zeroing the background.
 
-    Both tensors are (1, 3, H, W) in [-1, 1].
-    mask is (1, 1, H, W) in {0, 1}.
+    Why bounding-box crop instead of masking-to-zero
+    -------------------------------------------------
+    LPIPS uses deep convolutional networks (AlexNet / VGG).  Multiplying the
+    image by a binary mask creates a hard black border at the mask boundary.
+    Every convolution kernel that straddles that border picks up this
+    artificial edge, injecting a spurious signal that inflates or deflates the
+    LPIPS score depending on boundary shape — completely unrelated to how
+    well the defect was generated.
+
+    Cropping to the tight bounding box of the mask region removes the
+    artificial edge entirely: the convolutions see only real image content.
+    This also matches Figure 3 of the paper, which visually shows the defect
+    patch in isolation.
+
+    All tensors are (1, 3, H, W) in [-1, 1]; mask is (1, 1, H, W) in {0, 1}.
     """
-    # Crop to bounding box of mask for efficiency (optional)
-    mask_3 = mask.expand_as(generated)
-    # Zero out everything outside the mask before computing LPIPS
-    gen_masked = generated * mask_3
-    orig_masked = original * mask_3
+    y_min, y_max, x_min, x_max = _mask_bounding_box(mask)
+
+    # Physical crop — no artificial edges, only real pixel content
+    gen_crop  = generated[:, :, y_min : y_max + 1, x_min : x_max + 1]
+    orig_crop = original[:, :,  y_min : y_max + 1, x_min : x_max + 1]
+
+    # LPIPS requires at least a minimal spatial size; guard against tiny crops
+    if gen_crop.shape[-1] < 16 or gen_crop.shape[-2] < 16:
+        gen_crop  = F.interpolate(gen_crop,  size=(16, 16), mode="bilinear", align_corners=False)
+        orig_crop = F.interpolate(orig_crop, size=(16, 16), mode="bilinear", align_corners=False)
 
     with torch.no_grad():
-        score = lpips_fn(gen_masked, orig_masked).item()
+        score = lpips_fn(gen_crop, orig_crop).item()
     return score
 
 
@@ -210,7 +251,7 @@ def low_fidelity_selection(
     """
     From a list of generated images, select the one with the *highest* LPIPS
     score within the masked region (= lowest reconstruction fidelity = most
-    pronounced defect).
+    pronounced defect expression).
 
     Parameters
     ----------
@@ -221,9 +262,9 @@ def low_fidelity_selection(
 
     Returns
     -------
-    best_image : selected tensor
-    best_idx   : index in the input list
-    best_score : LPIPS score of the selected image
+    best_image : the selected tensor
+    best_idx   : its index in the input list
+    best_score : its LPIPS score
     """
     best_score = -1.0
     best_idx = 0
