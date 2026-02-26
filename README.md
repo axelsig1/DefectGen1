@@ -37,15 +37,40 @@ defectfill/
 
 ## Dataset Layout
 
+Two layouts are supported and auto-detected at runtime.
+
+**Flat** (original):
 ```
-data/
-└── <object>/
-    ├── defective/          ← RGB defect images  (any common format)
-    ├── defective_masks/    ← Pixel-accurate binary masks (white = defect)
-    └── good/               ← Defect-free reference images
+data/<object>/
+    defective/          ← defect images
+    defective_masks/    ← binary masks
+    good/               ← defect-free images
 ```
 
-File stems in `defective/` and `defective_masks/` should match (e.g. `001.png` ↔ `001.png`).
+**Nested** (train/test wrapper + defect-type subfolder):
+```
+data/<object>/
+    train/
+        defective/
+            crack/      ← defect images
+        defective_masks/
+            crack/      ← binary masks
+    test/
+        good/           ← defect-free images
+```
+
+Image and mask files must share the same filename stem within their respective
+sub-folders (e.g. `crack/001.png` ↔ `crack/001.png`).
+
+Pass the **object root** (`data/concrete`) to both `train.py` and `generate.py`;
+`train/`, `test/`, `good/`, and defect-type sub-folders are resolved automatically.
+
+### Train / test split
+
+The code mirrors the paper's protocol: all defect image–mask pairs (regardless of
+which sub-folder they live in) are pooled, then split **1/3 train / 2/3 test**
+with a fixed random seed. With 21 pairs this gives 7 training pairs and 14 test
+masks applied to good images during generation.
 
 ---
 

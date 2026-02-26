@@ -2,12 +2,29 @@
 DefectFill Dataset
 ==================
 
-Directory layout expected under ``data_root``:
+Supported directory layouts
+---------------------------
+**Flat** (original)::
 
     data_root/
-        defective/          ← defect images  (RGB, any common format)
-        defective_masks/    ← pixel-accurate binary masks (white = defect region)
-        good/               ← defect-free images
+        defective/                  ← defect images
+        defective_masks/            ← binary masks
+        good/                       ← defect-free images
+
+**Nested** (train/test wrapper + defect-type subfolder)::
+
+    data_root/
+        train/
+            defective/
+                crack/              ← defect images
+            defective_masks/
+                crack/              ← binary masks
+        test/
+            good/                   ← defect-free images
+
+The dataset automatically detects which layout is present.
+``train/`` and ``test/`` wrapper folders are ignored for the purposes of the
+1/3–2/3 split; all defective pairs are pooled first and then split.
 
 Train / test split
 ------------------
@@ -35,7 +52,7 @@ boundaries such as cracks or scratches.
 import os
 import random
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -61,8 +78,16 @@ MASK_BINARISE_THRESHOLD = 0.002
 # ---------------------------------------------------------------------------
 
 def _list_images(folder: str) -> List[Path]:
+    """
+    Recursively collect all image files under *folder*.
+
+    Handles both flat and nested (defect-type subfolder) layouts::
+
+        defective/crack/001.png   # nested
+        defective/001.png         # flat
+    """
     return sorted(
-        p for p in Path(folder).iterdir() if p.suffix.lower() in IMG_EXTS
+        p for p in Path(folder).rglob("*") if p.suffix.lower() in IMG_EXTS
     )
 
 
@@ -275,29 +300,77 @@ class DefectFillDataset(Dataset):
         self.rand_box_max_frac = rand_box_max_frac
         self.augment         = augment
 
-        # ---- Collect all matched (defective, mask) pairs ----
-        defective_dir = os.path.join(data_root, "defective")
-        masks_dir     = os.path.join(data_root, "defective_masks")
+        # ---- Resolve directory layout ----
+        # Support two layouts:
+        #
+        #   Layout A – flat (original expected layout):
+        #       data_root/defective/          ← images directly here
+        #       data_root/defective_masks/    ← masks directly here
+        #
+        #   Layout B – nested with train/ wrapper and defect-type subfolder:
+        #       data_root/train/defective/crack/   ← images
+        #       data_root/train/defective_masks/crack/   ← masks
+        #
+        # Detection: if data_root/defective does not exist, look one level
+        # deeper inside any sub-directory (e.g. "train/").
+        root = Path(data_root)
 
-        defective_paths = _list_images(defective_dir)
-        mask_paths      = _list_images(masks_dir)
+        def _find_subdir(name: str) -> Optional[Path]:
+            """Return the first existing path matching *name* at depth 0 or 1."""
+            direct = root / name
+            if direct.exists():
+                return direct
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and (child / name).exists():
+                    return child / name
+            return None
 
-        mask_by_stem = {p.stem: p for p in mask_paths}
+        defective_dir = _find_subdir("defective")
+        masks_dir     = _find_subdir("defective_masks")
+
+        if defective_dir is None or masks_dir is None:
+            raise FileNotFoundError(
+                f"Could not find 'defective/' and/or 'defective_masks/' under "
+                f"'{data_root}' (checked root and one level of sub-directories)."
+            )
+
+        # _list_images is recursive so defect-type sub-folders are transparent
+        defective_paths = _list_images(str(defective_dir))
+        mask_paths      = _list_images(str(masks_dir))
+
+        # Match by (sub-folder-relative stem) so crack/001 matches crack/001,
+        # then fall back to bare stem, then fuzzy prefix.
+        def _relative_stem(p: Path, base: Path) -> str:
+            """E.g. base=defective_masks/crack, p=crack/001.png → 'crack/001'."""
+            try:
+                return str(p.relative_to(base).with_suffix(""))
+            except ValueError:
+                return p.stem
+
+        mask_by_rel  = {_relative_stem(m, masks_dir): m for m in mask_paths}
+        mask_by_stem = {m.stem: m for m in mask_paths}
+
         all_pairs: List[Tuple[Path, Path]] = []
         for dp in defective_paths:
-            mp = mask_by_stem.get(dp.stem)
-            if mp is None:
-                # Fuzzy fallback: mask stem starts with image stem
-                candidates = [m for m in mask_paths if m.stem.startswith(dp.stem)]
-                mp = candidates[0] if candidates else None
+            rel_key = _relative_stem(dp, defective_dir)   # e.g. "crack/001"
+            mp = (
+                mask_by_rel.get(rel_key)           # exact relative match
+                or mask_by_stem.get(dp.stem)        # bare stem match
+                or next(                            # fuzzy prefix
+                    (m for m in mask_paths if m.stem.startswith(dp.stem)), None
+                )
+            )
             if mp is not None:
                 all_pairs.append((dp, mp))
 
         if not all_pairs:
             raise FileNotFoundError(
-                f"No matched (image, mask) pairs found under '{data_root}'. "
-                "Ensure 'defective/' and 'defective_masks/' have files with "
-                "matching stems."
+                f"No matched (image, mask) pairs found.\n"
+                f"  Searched defective dir : {defective_dir}\n"
+                f"  Searched masks dir     : {masks_dir}\n"
+                f"  Found {len(defective_paths)} images and {len(mask_paths)} masks.\n"
+                "Ensure image and mask files share the same filename stem "
+                "(e.g. crack/001.png ↔ crack/001.png)."
             )
 
         # ---- Deterministic train / test split ----
@@ -365,13 +438,29 @@ class DefectFillDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class GoodImagesDataset(Dataset):
-    """Simple dataset for defect-free images used at inference time."""
+    """
+    Dataset for defect-free images used at inference time.
+
+    *good_dir* may be either:
+
+    * a direct path to a folder of images, e.g. ``data/concrete/test/good``
+    * the object root (e.g. ``data/concrete``), in which case the dataset
+      searches for a sub-directory named ``good`` at depth 0 or 1
+      (covers both ``good/`` and ``test/good/``).
+    """
 
     def __init__(self, good_dir: str, image_size: int = 512):
-        self.paths = _list_images(good_dir)
+        # Auto-resolve: if good_dir itself contains images, use it directly;
+        # otherwise search one level deep for a sub-folder named "good".
+        resolved = _resolve_good_dir(good_dir)
+        self.paths = _list_images(str(resolved))
         self.image_size = image_size
         if not self.paths:
-            raise FileNotFoundError(f"No images found in '{good_dir}'")
+            raise FileNotFoundError(
+                f"No images found in '{resolved}' "
+                f"(resolved from '{good_dir}')."
+            )
+        print(f"[GoodImagesDataset] {len(self.paths)} images from '{resolved}'")
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -379,3 +468,27 @@ class GoodImagesDataset(Dataset):
     def __getitem__(self, idx: int):
         img = _load_rgb(self.paths[idx], self.image_size)
         return _to_tensor(img), str(self.paths[idx])
+
+
+def _resolve_good_dir(path: str) -> Path:
+    """
+    Given *path*, return the directory that actually holds good images.
+
+    Search order:
+    1. ``path`` itself, if it contains image files.
+    2. ``path/good/``
+    3. ``path/*/good/``  (e.g. ``path/test/good/``)
+    """
+    p = Path(path)
+    # Case 1: path itself has images
+    if any(True for _ in p.rglob("*") if _.suffix.lower() in IMG_EXTS):
+        # But if path is the object root and has a 'good' sub-folder, prefer that
+        for candidate in [p / "good", *[c / "good" for c in sorted(p.iterdir()) if c.is_dir()]]:
+            if candidate.exists() and any(True for _ in candidate.iterdir() if _.suffix.lower() in IMG_EXTS):
+                return candidate
+        return p
+    # Case 2 / 3: search for a 'good' sub-folder
+    for candidate in [p / "good", *[c / "good" for c in sorted(p.iterdir()) if c.is_dir()]]:
+        if candidate.exists():
+            return candidate
+    return p  # fall back — FileNotFoundError will fire if empty

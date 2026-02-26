@@ -65,7 +65,9 @@ def parse_args() -> GenerationConfig:
                         help="Path to fine-tuned UNet LoRA weights directory.")
     parser.add_argument("--te_lora_weights_path", type=str, required=True,
                         help="Path to fine-tuned text encoder LoRA weights directory.")
-    parser.add_argument("--good_images_dir", type=str, required=True)
+    parser.add_argument("--good_images_dir", type=str, required=True,
+                        help="Object root (e.g. data/concrete) or direct path "
+                             "to good images. test/good/ is auto-resolved.")
     parser.add_argument("--masks_dir", type=str, default="",
                         help="Directory of binary masks. If empty, a random mask is generated.")
     parser.add_argument("--output_dir", type=str, default="generated")
