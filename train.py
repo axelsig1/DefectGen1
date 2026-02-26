@@ -84,7 +84,7 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--alpha", type=float, default=0.3)
     # Model
     parser.add_argument("--pretrained_model_name", type=str,
-                        default="stabilityai/stable-diffusion-2-inpainting")
+                        default="sd2-community/stable-diffusion-2-inpainting")
 
     args = parser.parse_args()
     cfg = TrainingConfig()

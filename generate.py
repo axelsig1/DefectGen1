@@ -12,7 +12,7 @@ selected (Low-Fidelity Selection).
 Usage
 -----
 python generate.py \
-    --pretrained_model_name stabilityai/stable-diffusion-2-inpainting \
+    --pretrained_model_name sd2-community/stable-diffusion-2-inpainting \
     --lora_weights_path output/hazelnut_hole/unet_lora_final \
     --te_lora_weights_path output/hazelnut_hole/text_encoder_lora_final \
     --good_images_dir data/hazelnut/good \
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 def parse_args() -> GenerationConfig:
     parser = argparse.ArgumentParser(description="Generate defect images with DefectFill")
     parser.add_argument("--pretrained_model_name", type=str,
-                        default="stabilityai/stable-diffusion-2-inpainting")
+                        default="sd2-community/stable-diffusion-2-inpainting")
     parser.add_argument("--lora_weights_path", type=str, required=True,
                         help="Path to fine-tuned UNet LoRA weights directory.")
     parser.add_argument("--te_lora_weights_path", type=str, required=True,

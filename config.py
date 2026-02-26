@@ -45,7 +45,10 @@ class TrainingConfig:
     # ---------- Augmentation ----------
     resize_min: float = 1.0
     resize_max: float = 1.125
-    """Random resize factor range; image+mask are jointly scaled then centre-cropped."""
+    """Random resize factor range; image+mask are jointly scaled then random-cropped
+    back to the original size.  A *random* crop (not centre) is used so that the
+    augmented defect region can appear at different positions within the crop window,
+    increasing positional diversity without changing the image resolution."""
 
     # ---------- Random mask (M_rand) ----------
     num_rand_boxes: int = 30
@@ -68,13 +71,13 @@ class TrainingConfig:
     save_steps: int = 500
     log_steps: int = 50
 
-    pretrained_model_name: str = "stabilityai/stable-diffusion-2-inpainting"
+    pretrained_model_name: str = "sd2-community/stable-diffusion-2-inpainting"
 
 
 @dataclass
 class GenerationConfig:
     # Model / LoRA checkpoint
-    pretrained_model_name: str = "stabilityai/stable-diffusion-2-inpainting"
+    pretrained_model_name: str = "sd2-community/stable-diffusion-2-inpainting"
     lora_weights_path: str = "output/lora_weights"
 
     object_name: str = "hazelnut"

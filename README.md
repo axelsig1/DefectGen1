@@ -81,7 +81,7 @@ python train.py \
 ```
 
 Key training details (from paper):
-- **Base model**: `stabilityai/stable-diffusion-2-inpainting`
+- **Base model**: `sd2-community/stable-diffusion-2-inpainting`
 - **LoRA** on UNet attention layers + text encoder projection matrices
 - **Warmup**: linear 0 → LR over first 100 steps
 - **Augmentation**: random resize ×[1.0, 1.125] + centre crop
@@ -94,7 +94,7 @@ Key training details (from paper):
 
 ```bash
 python generate.py \
-    --pretrained_model_name stabilityai/stable-diffusion-2-inpainting \
+    --pretrained_model_name sd2-community/stable-diffusion-2-inpainting \
     --lora_weights_path output/hazelnut_hole/unet_lora_final \
     --te_lora_weights_path output/hazelnut_hole/text_encoder_lora_final \
     --good_images_dir data/hazelnut/good \
