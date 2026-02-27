@@ -237,8 +237,14 @@ def compute_lpips_in_mask(
         gen_crop  = F.interpolate(gen_crop,  size=(16, 16), mode="bilinear", align_corners=False)
         orig_crop = F.interpolate(orig_crop, size=(16, 16), mode="bilinear", align_corners=False)
 
+    # lpips_fn lives on GPU; crops may be on CPU (e.g. from pil_to_tensor).
+    # Move both to wherever lpips_fn is before calling forward.
+    lpips_device = next(lpips_fn.parameters()).device
     with torch.no_grad():
-        score = lpips_fn(gen_crop, orig_crop).item()
+        score = lpips_fn(
+            gen_crop.to(lpips_device),
+            orig_crop.to(lpips_device),
+        ).item()
     return score
 
 

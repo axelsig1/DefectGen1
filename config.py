@@ -84,9 +84,21 @@ class GenerationConfig:
     placeholder_token: str = "sks"
 
     # Generation inputs
-    good_images_dir: str = "data/good"
+    good_images_dir: str = "data"  # pass object root; test/good/ is auto-resolved
+
+    data_root: str = ""
+    """Object root used during training (e.g. data/hazelnut). When set, the
+    test-split masks are resolved automatically using split_seed and
+    train_fraction. Takes priority over masks_dir."""
+
+    split_seed: int = 42
+    """Must match the seed used during training (default 42)."""
+
+    train_fraction: float = 1.0 / 3.0
+    """Must match the fraction used during training (default 1/3)."""
+
     masks_dir: str = ""
-    """Directory of binary PNG masks (0/255). If empty, masks are drawn interactively."""
+    """Explicit masks directory. Ignored when data_root is set."""
 
     output_dir: str = "generated"
     image_size: int = 512

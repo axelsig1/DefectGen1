@@ -68,8 +68,18 @@ def parse_args() -> GenerationConfig:
     parser.add_argument("--good_images_dir", type=str, required=True,
                         help="Object root (e.g. data/concrete) or direct path "
                              "to good images. test/good/ is auto-resolved.")
+    parser.add_argument("--data_root", type=str, default="",
+                        help="Object root used during training (e.g. data/hazelnut). "
+                             "When provided, the test-split masks (the 2/3 not used for "
+                             "training) are loaded automatically using the same split logic "
+                             "as train.py. Takes priority over --masks_dir.")
     parser.add_argument("--masks_dir", type=str, default="",
-                        help="Directory of binary masks. If empty, a random mask is generated.")
+                        help="Explicit directory of binary masks. Ignored when --data_root "
+                             "is set. If both are empty, random masks are generated.")
+    parser.add_argument("--split_seed", type=int, default=42,
+                        help="Must match the seed used during training (default 42).")
+    parser.add_argument("--train_fraction", type=float, default=0.3333,
+                        help="Must match the fraction used during training (default 1/3).")
     parser.add_argument("--output_dir", type=str, default="generated")
     parser.add_argument("--object_name", type=str, required=True)
     parser.add_argument("--placeholder_token", type=str, default="sks")
@@ -89,6 +99,12 @@ def parse_args() -> GenerationConfig:
     # Extra args not in config
     cfg._lora_weights_path = args.lora_weights_path
     cfg._te_lora_weights_path = args.te_lora_weights_path
+    # These three are now proper fields on GenerationConfig so the
+    # hasattr loop above already copies them — but set explicitly to
+    # be safe and for clarity.
+    cfg.data_root = args.data_root
+    cfg.split_seed = args.split_seed
+    cfg.train_fraction = args.train_fraction
     return cfg
 
 
@@ -105,24 +121,42 @@ def build_pipeline(
 ):
     """
     Load the SD2-inpainting pipeline and inject LoRA weights.
+
+    dtype strategy
+    --------------
+    The LoRA adapters were trained with the UNet and text encoder in fp32.
+    Loading the pipeline in fp16 and then calling merge_adapter() would merge
+    fp32 LoRA deltas into fp16 base weights — the merge rounds to fp16,
+    discarding the fine numerical detail that LoRA learned, and the fp16
+    activations at inference are in a different numerical regime than the fp32
+    activations the adapters were tuned against.  The result is corrupted,
+    "deep-fried" outputs.
+
+    Fix: load the pipeline in fp32 (the A40 has 48 GB, fp32 fits easily), apply
+    the PEFT LoRA on top without merging, and use torch.autocast only for the
+    actual denoising loop to keep inference fast.  Never call merge_adapter().
     """
     from diffusers import StableDiffusionInpaintPipeline
     from peft import PeftModel
 
     logger.info(f"Loading pipeline from: {pretrained_model}")
+    # Load base pipeline in fp32 — dtype must match what LoRA was trained with.
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         pretrained_model,
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float32,   # fp32, same as training
         safety_checker=None,
     )
 
     logger.info("Loading UNet LoRA weights …")
-    pipe.unet = PeftModel.from_pretrained(pipe.unet, unet_lora_path)
-    pipe.unet.merge_adapter()  # Merge LoRA into base weights for faster inference
+    # Apply LoRA on top of the fp32 base — do NOT call merge_adapter().
+    pipe.unet = PeftModel.from_pretrained(
+        pipe.unet, unet_lora_path, is_trainable=False
+    )
 
     logger.info("Loading text encoder LoRA weights …")
-    pipe.text_encoder = PeftModel.from_pretrained(pipe.text_encoder, te_lora_path)
-    pipe.text_encoder.merge_adapter()
+    pipe.text_encoder = PeftModel.from_pretrained(
+        pipe.text_encoder, te_lora_path, is_trainable=False
+    )
 
     pipe = pipe.to(device)
     pipe.set_progress_bar_config(disable=True)
@@ -146,31 +180,51 @@ def generate_with_blended_latents(
     weight_dtype,
 ) -> torch.Tensor:
     """
-    Run inpainting with "blended latent diffusion" style background replacement:
-    at each denoising step, the unmasked region is replaced with the noisy
-    latent of the original image, preserving background integrity.
+    Run SD2 inpainting and return a (3, H, W) tensor in [-1, 1].
 
-    Returns (3, H, W) tensor in [-1, 1].
+    Normalisation contract
+    ----------------------
+    Input  good_image : (3, H, W) float32 tensor in [-1, 1]
+    Input  mask       : (1, H, W) float32 tensor in {0, 1}  (1 = inpaint here)
+
+    The pipeline receives a PIL image (tensor_to_pil handles [-1,1] → [0,255])
+    and a PIL mask.  We use output_type="pil" deliberately:
+
+      output_type="pt"  is unreliable across diffusers versions — some return
+      the raw VAE decode in ~[-1,1], others normalise to [0,1].  Applying
+      * 2 - 1 to a [-1,1] tensor gives [-3, 1], which produces the blown-out,
+      over-saturated "deep-fried" artefacts.
+
+      output_type="pil" always gives a uint8 PIL image in [0, 255] regardless
+      of diffusers version.  We convert back to [-1,1] via pil_to_tensor.
+
+    The pipe is loaded in fp32 (LoRA was trained in fp32).  We wrap the call
+    in autocast so the denoising steps run in fp16 for speed while the model
+    weights stay in fp32.
     """
     H, W = good_image.shape[-2], good_image.shape[-1]
-    img_pil = tensor_to_pil(good_image.cpu())
-    mask_np = (mask.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+
+    # [-1,1] tensor → PIL [0,255]
+    img_pil  = tensor_to_pil(good_image.cpu())
+    mask_np  = (mask.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
 
-    result = pipe(
-        prompt=prompt,
-        image=img_pil,
-        mask_image=mask_pil,
-        height=H,
-        width=W,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        generator=generator,
-        output_type="pt",
-    ).images  # (1, 3, H, W) in [0, 1]
+    # Use autocast for fast fp16 denoising even though the model is in fp32
+    with torch.autocast(device_type=device.type, dtype=torch.float16):
+        result_pil = pipe(
+            prompt=prompt,
+            image=img_pil,
+            mask_image=mask_pil,
+            height=H,
+            width=W,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            output_type="pil",      # always uint8 RGB, safe across all diffusers versions
+        ).images[0]                 # PIL Image [0, 255]
 
-    # Convert [0,1] → [-1,1]
-    return result[0] * 2.0 - 1.0    # (3, H, W)
+    # PIL [0,255] → tensor [-1,1]  (pil_to_tensor = TF.to_tensor * 2 - 1)
+    return pil_to_tensor(result_pil)    # (3, H, W) in [-1, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -204,25 +258,51 @@ def generate(cfg: GenerationConfig):
     prompt = make_object_prompt(cfg.object_name, cfg.placeholder_token)
     logger.info(f"Generation prompt: '{prompt}'")
 
-    # Good images
-    good_paths = _list_images(cfg.good_images_dir)
-    logger.info(f"Found {len(good_paths)} good images in '{cfg.good_images_dir}'")
+    # ------------------------------------------------------------------ #
+    # Resolve good images
+    # ------------------------------------------------------------------ #
+    from dataset import GoodImagesDataset, _resolve_good_dir, _list_images as _li
+    good_dir = str(_resolve_good_dir(cfg.good_images_dir))
+    good_paths = _li(good_dir)
+    logger.info(f"Found {len(good_paths)} good images in '{good_dir}'")
 
-    # Masks
-    if cfg.masks_dir:
-        mask_paths = _list_images(cfg.masks_dir)
+    # ------------------------------------------------------------------ #
+    # Resolve masks — prefer --data_root (uses exact test split) over
+    # --masks_dir (manual) over random generation
+    # ------------------------------------------------------------------ #
+    data_root = getattr(cfg, "data_root", "")
+    split_seed = getattr(cfg, "split_seed", 42)
+    train_fraction = getattr(cfg, "train_fraction", 1.0 / 3.0)
+
+    if data_root:
+        # Reuse DefectFillDataset(split="test") directly — this is the exact
+        # same code path that found 70 pairs during training, so it is
+        # guaranteed to produce the right test masks without any duplication.
+        from dataset import DefectFillDataset
+        test_ds = DefectFillDataset(
+            data_root=data_root,
+            split="test",
+            train_fraction=train_fraction,
+            split_seed=split_seed,
+            image_size=cfg.image_size,
+            augment=False,   # no augmentation needed; we only want the mask paths
+        )
+        mask_paths = [mp for _, mp in test_ds.pairs]
+        logger.info(
+            f"Using --data_root split: {len(mask_paths)} test masks "
+            f"(train_fraction={train_fraction:.3f}, seed={split_seed})"
+        )
+    elif cfg.masks_dir:
+        mask_paths = [Path(p) for p in _li(cfg.masks_dir)]
         logger.info(f"Found {len(mask_paths)} masks in '{cfg.masks_dir}'")
     else:
         mask_paths = []
-        logger.info("No masks directory provided; random masks will be generated.")
+        logger.info("No masks provided; random masks will be generated.")
 
-    # Pair good images with masks (cycle through masks if fewer than images)
+    # Pair each good image with a mask (cycle through masks if counts differ)
     pairs = []
     for i, gp in enumerate(good_paths):
-        if mask_paths:
-            mp = mask_paths[i % len(mask_paths)]
-        else:
-            mp = None
+        mp = mask_paths[i % len(mask_paths)] if mask_paths else None
         pairs.append((gp, mp))
 
     # ------------------------------------------------------------------ #

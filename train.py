@@ -169,11 +169,22 @@ def train(cfg: TrainingConfig):
         dropout=cfg.lora_dropout,
     )
 
-    unet.to(device, dtype=weight_dtype)
-    text_encoder.to(device, dtype=weight_dtype)
+    # UNet and text encoder must stay in fp32 so that their trainable LoRA
+    # parameters have fp32 gradients. GradScaler requires fp32 parameters —
+    # it unscales fp32 gradients after the backward pass; if the params are
+    # already fp16 it raises "Attempting to unscale FP16 gradients".
+    # autocast() handles casting activations to fp16 during the forward pass,
+    # so the computation is still fast; only the stored weights stay fp32.
+    unet.to(device)
+    text_encoder.to(device)
 
-    # Enable gradient checkpointing to save memory
-    unet.enable_gradient_checkpointing()
+    # Gradient checkpointing is intentionally disabled.
+    # It re-runs the forward pass during backward, which conflicts with
+    # AttnProbeProcessor: the stored attention maps from the first forward
+    # pass have different tensor shapes than those from the recomputed pass,
+    # causing a CheckpointError. With an A40 (48 GB) and batch_size=4 fp16
+    # (~20 GB used), there is ample VRAM and checkpointing is not needed.
+    # unet.enable_gradient_checkpointing()  # <-- do not re-enable
 
     # ------------------------------------------------------------------ #
     # 3. Dataset & DataLoader
@@ -255,7 +266,7 @@ def train(cfg: TrainingConfig):
     progress_bar = tqdm(total=cfg.train_steps, desc="Training")
 
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler(enabled=(cfg.mixed_precision == "fp16"))
+    scaler = torch.amp.GradScaler('cuda', enabled=(cfg.mixed_precision == "fp16"))
 
     unet.train()
     text_encoder.train()
@@ -266,44 +277,49 @@ def train(cfg: TrainingConfig):
             if global_step >= cfg.train_steps:
                 break
 
-            # Move batch to device
-            image = batch["image"].to(device, dtype=weight_dtype)      # (B,3,H,W)
-            mask = batch["mask"].to(device, dtype=weight_dtype)         # (B,1,H,W)
-            mask_rand = batch["mask_rand"].to(device, dtype=weight_dtype)
-            b_def = batch["b_def"].to(device, dtype=weight_dtype)
-            b_rand = batch["b_rand"].to(device, dtype=weight_dtype)
+            # Move batch to device in fp32.
+            # The UNet and text encoder are fp32; autocast casts activations
+            # to fp16 internally during the forward pass.
+            image = batch["image"].to(device)       # (B,3,H,W)
+            mask = batch["mask"].to(device)          # (B,1,H,W)
+            mask_rand = batch["mask_rand"].to(device)
+            b_def = batch["b_def"].to(device)
+            b_rand = batch["b_rand"].to(device)
 
             B = image.shape[0]
 
-            with torch.cuda.amp.autocast(enabled=(cfg.mixed_precision != "no")):
+            with torch.amp.autocast('cuda', enabled=(cfg.mixed_precision != "no")):
 
                 # --- Sample timestep and noise (shared between branches) ---
                 timesteps = torch.randint(
                     0, noise_scheduler.config.num_train_timesteps,
                     (B,), device=device
                 ).long()
-                noise = torch.randn_like(encode_latent(vae, image, weight_dtype))
-
-                # --- Encode image and backgrounds ---
-                x0 = encode_latent(vae, image, weight_dtype)
-                b_def_lat = encode_latent(vae, b_def, weight_dtype)
-                b_rand_lat = encode_latent(vae, b_rand, weight_dtype)
+                # VAE encoding: cast inputs to fp16 for the frozen VAE only.
+                # Outputs are cast back to fp32 so the rest of the graph stays fp32.
+                x0        = encode_latent(vae, image, weight_dtype).float()
+                b_def_lat = encode_latent(vae, b_def,  weight_dtype).float()
+                b_rand_lat= encode_latent(vae, b_rand, weight_dtype).float()
 
                 latent_h, latent_w = x0.shape[-2], x0.shape[-1]
 
-                # Noisy latent at sampled timestep
+                noise = torch.randn_like(x0)   # fp32, same shape as x0
+
+                # Noisy latent at sampled timestep (fp32)
                 x_t = noise_scheduler.add_noise(x0, noise, timesteps)
 
-                # Resize masks to latent resolution
+                # Resize masks to latent resolution (fp32)
                 mask_lat = F.interpolate(
                     mask.float(), size=(latent_h, latent_w), mode="nearest"
-                ).to(weight_dtype)
+                )
                 mask_rand_lat = F.interpolate(
                     mask_rand.float(), size=(latent_h, latent_w), mode="nearest"
-                ).to(weight_dtype)
+                )
 
                 # ---- Defect branch: x_t^def = concat(x_t, b_def, M) ----
-                x_t_def = torch.cat([x_t, b_def_lat, mask_lat], dim=1)
+                # OLD: x_t_def = torch.cat([x_t, b_def_lat, mask_lat], dim=1)
+                x_t_def = torch.cat([x_t, mask_lat, b_def_lat], dim=1)
+
 
                 # Text embedding for P_def
                 tokens_def = tokenizer(
@@ -320,7 +336,8 @@ def train(cfg: TrainingConfig):
                 ).sample
 
                 # ---- Object branch: x_t^obj = concat(x_t, b_rand, M_rand) ----
-                x_t_obj = torch.cat([x_t, b_rand_lat, mask_rand_lat], dim=1)
+                # OLD: x_t_obj = torch.cat([x_t, b_rand_lat, mask_rand_lat], dim=1)
+                x_t_obj = torch.cat([x_t, mask_rand_lat, b_rand_lat], dim=1)
 
                 tokens_obj = tokenizer(
                     [p_obj] * B,
@@ -446,13 +463,17 @@ def extract_decoder_attn_map(
             mode="bilinear",
             align_corners=False,
         )
+        # Average over heads HERE, per layer → (1, 1, latent_h, latent_w).
+        # Different decoder layers have different head counts (e.g. 40 vs 80),
+        # so we must collapse to a common shape before stacking across layers.
+        token_map = token_map.mean(0, keepdim=True)
         maps.append(token_map)
 
     if not maps:
         return None
 
-    avg = torch.stack(maps, dim=0).mean(0)          # (bh, 1, latent_h, latent_w)
-    avg = avg.mean(0, keepdim=True)                  # (1, 1, latent_h, latent_w)
+    # All entries are now (1, 1, latent_h, latent_w) — safe to stack
+    avg = torch.stack(maps, dim=0).mean(0)           # (1, 1, latent_h, latent_w)
 
     # Normalise to [0, 1]
     _min = avg.amin(dim=(-2, -1), keepdim=True)
