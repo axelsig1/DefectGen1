@@ -113,3 +113,9 @@ class GenerationConfig:
 
     seed: int = 42
     mixed_precision: str = "fp16"
+
+    # ---------- Mask Blending ----------
+    mask_dilation_size: int = 0
+    """Size of the max filter to thicken the mask before generation. 0 to disable."""
+    mask_blur_radius: int = 0
+    """Radius of the Gaussian blur to soften mask edges. 0 to disable."""

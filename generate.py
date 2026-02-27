@@ -33,6 +33,7 @@ import torch
 import numpy as np
 from PIL import Image
 from tqdm.auto import tqdm
+from PIL import ImageFilter
 
 from config import GenerationConfig
 from dataset import GoodImagesDataset, _list_images, _load_mask
@@ -89,6 +90,8 @@ def parse_args() -> GenerationConfig:
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
     parser.add_argument("--num_samples_lfs", type=int, default=8)
+    parser.add_argument("--mask_dilation_size", type=int, default=0, help="Thickens the mask to prevent losing thin defects.")
+    parser.add_argument("--mask_blur_radius", type=int, default=0, help="Blurs the mask edges for seamless blending.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mixed_precision", type=str, default="fp16",
                         choices=["no", "fp16", "bf16"])
@@ -331,11 +334,22 @@ def generate(cfg: GenerationConfig):
         mask_paths = []
         logger.info("No masks provided; random masks will be generated.")
 
-    # Pair each good image with a mask (cycle through masks if counts differ)
-    pairs = []
-    for i, gp in enumerate(good_paths):
-        mp = mask_paths[i % len(mask_paths)] if mask_paths else None
-        pairs.append((gp, mp))
+    # Pair masks 1-to-1 with good images.
+    # We have N masks and potentially many more good images.  Rather than
+    # cycling masks over all good images (which would generate len(good_paths)
+    # samples and apply each mask ~30 times), we randomly select exactly N
+    # good images — one per mask — so the total output is N images.
+    import random as _random
+    _random.seed(cfg.seed)
+    if mask_paths:
+        n = len(mask_paths)
+        selected_good = _random.sample(good_paths, min(n, len(good_paths)))
+        pairs = list(zip(selected_good, mask_paths))
+        logger.info(f"Paired {len(pairs)} masks with {len(pairs)} randomly selected good images.")
+    else:
+        # No masks: generate one sample per good image with a random mask each
+        pairs = [(gp, None) for gp in good_paths]
+        logger.info(f"No masks; will generate random masks for {len(pairs)} good images.")
 
     # ------------------------------------------------------------------ #
     # Generation loop
@@ -355,6 +369,14 @@ def generate(cfg: GenerationConfig):
             mask_t = generate_random_box_mask(cfg.image_size, cfg.image_size, num_boxes=1,
                                                min_frac=0.1, max_frac=0.3)
             mask_pil = Image.fromarray((mask_t.squeeze(0).numpy() * 255).astype(np.uint8))
+
+        # Dilation (Thickening): Expands the white areas so thin cracks aren't lost
+        if cfg.mask_dilation_size > 0:
+            mask_pil = mask_pil.filter(ImageFilter.MaxFilter(size=cfg.mask_dilation_size))
+
+        # Gaussian Blur: Softens the edges into gradients for seamless blending
+        if cfg.mask_blur_radius > 0:
+            mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=cfg.mask_blur_radius))
 
         mask_arr = np.array(mask_pil)
         mask_tensor = torch.from_numpy(mask_arr).float().unsqueeze(0).unsqueeze(0) / 255.0  # (1,1,H,W)
