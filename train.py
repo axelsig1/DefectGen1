@@ -59,6 +59,8 @@ def parse_args() -> TrainingConfig:
     # Data
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--object_name", type=str, required=True)
+    parser.add_argument("--defect_type", type=str, default=None,
+                        help="Defect subfolder, e.g. crack. Omit to use all types.")
     parser.add_argument("--placeholder_token", type=str, default="sks")
     parser.add_argument("--image_size", type=int, default=512)
     # Training
@@ -192,6 +194,7 @@ def train(cfg: TrainingConfig):
     logger.info(f"Loading dataset from: {cfg.data_root}")
     dataset = DefectFillDataset(
         data_root=cfg.data_root,
+        defect_type=cfg.defect_type,
         image_size=cfg.image_size,
         resize_min=cfg.resize_min,
         resize_max=cfg.resize_max,
@@ -316,10 +319,14 @@ def train(cfg: TrainingConfig):
                     mask_rand.float(), size=(latent_h, latent_w), mode="nearest"
                 )
 
-                # ---- Defect branch: x_t^def = concat(x_t, b_def, M) ----
-                # OLD: x_t_def = torch.cat([x_t, b_def_lat, mask_lat], dim=1)
+                # ---- Defect branch: x_t^def = concat(x_t, M, b_def) ----
+                # diffusers SD2-inpainting UNet expects 9 channels in this order:
+                #   [noisy_latents(4), mask(1), masked_image(4)]
+                # Our earlier code had [x_t, b_def_lat, mask_lat] which is
+                # [4, 4, 1] — mask and masked_image swapped. This caused the UNet
+                # to receive image colours where it expected a binary mask and
+                # vice versa, completely scrambling the learned representations.
                 x_t_def = torch.cat([x_t, mask_lat, b_def_lat], dim=1)
-
 
                 # Text embedding for P_def
                 tokens_def = tokenizer(
@@ -335,8 +342,8 @@ def train(cfg: TrainingConfig):
                     x_t_def, timesteps, encoder_hidden_states=c_def
                 ).sample
 
-                # ---- Object branch: x_t^obj = concat(x_t, b_rand, M_rand) ----
-                # OLD: x_t_obj = torch.cat([x_t, b_rand_lat, mask_rand_lat], dim=1)
+                # ---- Object branch: x_t^obj = concat(x_t, M_rand, b_rand) ----
+                # Same channel order fix: [noisy(4), mask(1), masked_image(4)]
                 x_t_obj = torch.cat([x_t, mask_rand_lat, b_rand_lat], dim=1)
 
                 tokens_obj = tokenizer(

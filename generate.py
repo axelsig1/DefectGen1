@@ -80,6 +80,8 @@ def parse_args() -> GenerationConfig:
                         help="Must match the seed used during training (default 42).")
     parser.add_argument("--train_fraction", type=float, default=0.3333,
                         help="Must match the fraction used during training (default 1/3).")
+    parser.add_argument("--defect_type", type=str, default=None,
+                        help="Defect subfolder, e.g. crack. Must match train.py.")
     parser.add_argument("--output_dir", type=str, default="generated")
     parser.add_argument("--object_name", type=str, required=True)
     parser.add_argument("--placeholder_token", type=str, default="sks")
@@ -105,6 +107,7 @@ def parse_args() -> GenerationConfig:
     cfg.data_root = args.data_root
     cfg.split_seed = args.split_seed
     cfg.train_fraction = args.train_fraction
+    cfg.defect_type = args.defect_type
     return cfg
 
 
@@ -204,27 +207,55 @@ def generate_with_blended_latents(
     """
     H, W = good_image.shape[-2], good_image.shape[-1]
 
-    # [-1,1] tensor → PIL [0,255]
+    # [-1,1] tensor → PIL [0,255]  (pipeline always takes PIL)
     img_pil  = tensor_to_pil(good_image.cpu())
     mask_np  = (mask.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
 
-    # Use autocast for fast fp16 denoising even though the model is in fp32
-    with torch.autocast(device_type=device.type, dtype=torch.float16):
-        result_pil = pipe(
-            prompt=prompt,
-            image=img_pil,
-            mask_image=mask_pil,
-            height=H,
-            width=W,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",      # always uint8 RGB, safe across all diffusers versions
-        ).images[0]                 # PIL Image [0, 255]
+    # Run pipeline in fp32, no outer autocast.
+    #
+    # Why no autocast:
+    #   The pipeline was loaded with torch_dtype=float32.  Wrapping it in an
+    #   autocast(fp16) context makes diffusers' internal dtype guards see fp16
+    #   activations where they expect fp32, which corrupts the VAE decode and
+    #   produces the wrong-colour "deep-fried" artefacts.
+    #
+    # Why output_type="pil":
+    #   output_type="pt" is unreliable across diffusers versions (some return
+    #   the raw VAE output in ~[-1,1]; others return normalised [0,1]).
+    #   PIL always gives a clean uint8 [0,255] image.
+    result_pil = pipe(
+        prompt=prompt,
+        image=img_pil,
+        mask_image=mask_pil,
+        height=H,
+        width=W,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        generator=generator,
+        output_type="pil",
+    ).images[0]   # PIL Image [0, 255]
 
-    # PIL [0,255] → tensor [-1,1]  (pil_to_tensor = TF.to_tensor * 2 - 1)
-    return pil_to_tensor(result_pil)    # (3, H, W) in [-1, 1]
+    # PIL [0,255] → float tensor [-1,1]
+    result = pil_to_tensor(result_pil).to(good_image.device)  # (3, H, W)
+
+    # -------------------------------------------------------------------
+    # Background paste-back (critical for inpainting quality)
+    # -------------------------------------------------------------------
+    # The pipeline decodes the full latent through the VAE at the end.
+    # VAE encode→decode is lossy: background pixels drift slightly, and
+    # strong LoRA defect signals bleed into surrounding areas through the
+    # convolutional layers.  Explicitly restoring the original pixels in
+    # the non-masked region gives pixel-perfect background preservation,
+    # which is also what the paper means by "replacing background latents
+    # during inference".
+    #
+    #   mask  : (1, H, W) in {0, 1} — 1 = defect region, 0 = background
+    #   result_final = result  × mask  +  original × (1 − mask)
+    mask_3ch = mask.to(result.device).expand_as(result)   # (3, H, W)
+    result = result * mask_3ch + good_image.to(result.device) * (1.0 - mask_3ch)
+
+    return result    # (3, H, W) in [-1, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +313,7 @@ def generate(cfg: GenerationConfig):
         test_ds = DefectFillDataset(
             data_root=data_root,
             split="test",
+            defect_type=getattr(cfg, "defect_type", None),
             train_fraction=train_fraction,
             split_seed=split_seed,
             image_size=cfg.image_size,

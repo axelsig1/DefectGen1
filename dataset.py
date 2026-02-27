@@ -279,6 +279,7 @@ class DefectFillDataset(Dataset):
         self,
         data_root: str,
         split: str = "train",
+        defect_type: Optional[str] = None,
         train_fraction: float = 1.0 / 3.0,
         split_seed: int = 42,
         image_size: int = 512,
@@ -334,7 +335,20 @@ class DefectFillDataset(Dataset):
                 f"'{data_root}' (checked root and one level of sub-directories)."
             )
 
-        # _list_images is recursive so defect-type sub-folders are transparent
+        # Narrow to a specific defect type subfolder (e.g. 'crack') when given.
+        # Without this, _list_images recurses into ALL subfolders (crack, hole,
+        # cut, ...) and mixes every defect type into one training run, which
+        # prevents the model from learning any single concept well.
+        if defect_type is not None:
+            defective_dir = defective_dir / defect_type
+            masks_dir     = masks_dir     / defect_type
+            if not defective_dir.exists():
+                raise FileNotFoundError(
+                    f"Defect type '{defect_type}' not found at '{defective_dir}'. "
+                    f"Available subdirectories: "
+                    f"{[d.name for d in defective_dir.parent.iterdir() if d.is_dir()]}"
+                )
+
         defective_paths = _list_images(str(defective_dir))
         mask_paths      = _list_images(str(masks_dir))
 

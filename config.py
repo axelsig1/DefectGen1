@@ -11,6 +11,9 @@ class TrainingConfig:
     data_root: str = "data"
     """Root directory containing 'defective', 'defective_masks', and 'good' sub-folders."""
 
+    defect_type: Optional[str] = None
+    """Defect subfolder to train on (e.g. 'crack'). None = use all defect types."""
+
     object_name: str = "hazelnut"
     """Human-readable name of the object, used in the object prompt P_obj."""
 
