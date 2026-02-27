@@ -363,13 +363,16 @@ def train(cfg: TrainingConfig):
                     x_t_obj, timesteps, encoder_hidden_states=c_obj
                 ).sample
 
-                # Extract [V*] attention map from decoder layers
+                # Extract [V*] attention map from decoder layers.
+                # Pass batch_size so the function can separate B from heads
+                # and return (B, 1, H, W) instead of a collapsed (1, 1, H, W).
                 attn_map_vstar = extract_decoder_attn_map(
                     attn_store_obj,
                     vstar_idx_obj,
                     latent_h,
                     latent_w,
                     device,
+                    batch_size=B,
                 )
                 reset_attn_processors(unet)
                 attn_store_obj.clear()
@@ -446,12 +449,23 @@ def extract_decoder_attn_map(
     latent_h: int,
     latent_w: int,
     device,
+    batch_size: int = 1,
 ) -> torch.Tensor:
     """
-    Average [V*] cross-attention maps across decoder layers, then resize to
-    (1, 1, latent_h, latent_w).
+    Average [V*] cross-attention maps across decoder layers.
 
-    Each element of attn_store is (batch*heads, spatial, text_len).
+    Returns (B, 1, latent_h, latent_w) — one map per image in the batch.
+
+    Each element of attn_store has shape (B*heads, spatial, text_len).
+    The previous implementation called .mean(0) which collapsed BOTH the
+    batch AND head dimensions into a single (1, 1, H, W) map.  When that
+    was compared against mask (B, 1, H, W) in the attention loss, the L2
+    was computed between one smeared average and B distinct masks, causing
+    the loss to fluctuate wildly and giving the model no useful gradient.
+
+    Fix: reshape (B*heads, spatial) → (B, heads, spatial), average over
+    heads only (dim=1), keeping the batch dimension intact.  Different
+    decoder layers have different head counts so we infer heads = bh // B.
     """
     maps = []
     for attn_w in attn_store:
@@ -461,28 +475,32 @@ def extract_decoder_attn_map(
         side = int(spatial ** 0.5)
         if side * side != spatial:
             continue
+        if bh % batch_size != 0:
+            continue   # skip if shapes are inconsistent
 
-        token_map = attn_w[:, :, vstar_token_idx]          # (bh, spatial)
-        token_map = token_map.view(bh, 1, side, side)       # (bh, 1, side, side)
+        heads = bh // batch_size
+
+        token_map = attn_w[:, :, vstar_token_idx]              # (B*heads, spatial)
+        token_map = token_map.view(batch_size, heads, side, side)  # (B, heads, side, side)
+
+        # Average over heads only — keep batch dimension intact
+        token_map = token_map.mean(dim=1, keepdim=True)        # (B, 1, side, side)
+
         token_map = F.interpolate(
             token_map.float(),
             size=(latent_h, latent_w),
             mode="bilinear",
             align_corners=False,
-        )
-        # Average over heads HERE, per layer → (1, 1, latent_h, latent_w).
-        # Different decoder layers have different head counts (e.g. 40 vs 80),
-        # so we must collapse to a common shape before stacking across layers.
-        token_map = token_map.mean(0, keepdim=True)
+        )                                                       # (B, 1, latent_h, latent_w)
         maps.append(token_map)
 
     if not maps:
         return None
 
-    # All entries are now (1, 1, latent_h, latent_w) — safe to stack
-    avg = torch.stack(maps, dim=0).mean(0)           # (1, 1, latent_h, latent_w)
+    # Stack across layers and average — shape stays (B, 1, latent_h, latent_w)
+    avg = torch.stack(maps, dim=0).mean(0)
 
-    # Normalise to [0, 1]
+    # Normalise each image in the batch independently to [0, 1]
     _min = avg.amin(dim=(-2, -1), keepdim=True)
     _max = avg.amax(dim=(-2, -1), keepdim=True)
     avg = (avg - _min) / (_max - _min + 1e-8)
