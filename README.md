@@ -109,7 +109,7 @@ Key training details (from paper):
 - **Base model**: `sd2-community/stable-diffusion-2-inpainting`
 - **LoRA** on UNet attention layers + text encoder projection matrices
 - **Warmup**: linear 0 → LR over first 100 steps
-- **Augmentation**: random resize ×[1.0, 1.125] + centre crop
+- **Augmentation**: random resize ×[1.0, 1.125] + random crop
 - **Random masks** M_rand: 30 boxes, sides 3–25% of image size
 - **[V*] token**: the word `sks`
 
