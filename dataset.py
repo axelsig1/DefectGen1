@@ -24,7 +24,7 @@ Supported directory layouts
 
 The dataset automatically detects which layout is present.
 ``train/`` and ``test/`` wrapper folders are ignored for the purposes of the
-1/3–2/3 split; all defective pairs are pooled first and then split.
+1/3-2/3 split; all defective pairs are pooled first and then split.
 
 Train / test split
 ------------------
@@ -37,7 +37,7 @@ With 21 pairs the split is 7 train / 14 test.
 Thin-mask-safe resizing
 -----------------------
 ``Image.NEAREST`` hard-snaps pixels to 0/255 during resize; a feature that
-is only 1–2 pixels wide can disappear entirely.  Instead we:
+is only 1-2 pixels wide can disappear entirely.  Instead we:
 
   1. Resize with ``Image.BILINEAR``  → sub-pixel thin strokes become low-
      probability floating-point values (they are no longer exactly 0).
@@ -112,15 +112,15 @@ def _load_mask(path: Path, size: int) -> Image.Image:
     """
     mask = Image.open(path).convert("L")
 
-    # Step 1: clean-binarise the source to remove JPEG/compression noise
+    # clean-binarise the source to remove JPEG/compression noise
     src_arr = np.array(mask, dtype=np.float32) / 255.0
     src_arr = (src_arr > 0.5).astype(np.float32)
     mask = Image.fromarray((src_arr * 255).astype(np.uint8), mode="L")
 
-    # Step 2: bilinear resize (thin-safe)
+    # bilinear resize (thin-safe)
     mask = mask.resize((size, size), Image.BILINEAR)
 
-    # Step 3: re-binarise with low threshold
+    # re-binarise with low threshold
     mask_arr = np.array(mask, dtype=np.float32) / 255.0
     binary = (mask_arr > MASK_BINARISE_THRESHOLD).astype(np.uint8) * 255
     return Image.fromarray(binary, mode="L")
@@ -190,11 +190,9 @@ def joint_resize_crop(
     Randomly upscale image + mask by a factor in [resize_min, resize_max],
     then apply a *random* crop back to target_size × target_size.
 
-    Why random crop (not centre crop)?
-    -----------------------------------
     The paper says the image and mask are "randomly resized … and then cropped
-    back to their original size."  A *random* crop (rather than a fixed centre
-    crop) is the standard interpretation: it varies which sub-region ends up in
+    back to their original size." I interpret this as a random crop (rather than 
+    a fixed centre crop) since this varies which sub-region ends up in
     the training sample, giving the model diversity in the spatial position of
     the defect and preventing it from learning a location prior.  A centre crop
     would always extract the same region and provide no positional augmentation.
@@ -301,7 +299,7 @@ class DefectFillDataset(Dataset):
         self.rand_box_max_frac = rand_box_max_frac
         self.augment         = augment
 
-        # ---- Resolve directory layout ----
+        # ---- Directory layout ----
         # Support two layouts:
         #
         #   Layout A – flat (original expected layout):

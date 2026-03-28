@@ -126,21 +126,17 @@ def build_pipeline(
     device,
 ):
     """
-    Load the SD2-inpainting pipeline and inject LoRA weights.
+    Initializes the Stable Diffusion inpainting pipeline and loads PEFT adapters.
 
-    dtype strategy
-    --------------
-    The LoRA adapters were trained with the UNet and text encoder in fp32.
-    Loading the pipeline in fp16 and then calling merge_adapter() would merge
-    fp32 LoRA deltas into fp16 base weights — the merge rounds to fp16,
-    discarding the fine numerical detail that LoRA learned, and the fp16
-    activations at inference are in a different numerical regime than the fp32
-    activations the adapters were tuned against.  The result is corrupted,
-    "deep-fried" outputs.
+    Args:
+        pretrained_model (str): Path or HuggingFace ID for the base model.
+        unet_lora_path (str): Path to the trained UNet LoRA weights.
+        te_lora_path (str): Path to the trained Text Encoder LoRA weights.
+        weight_dtype (torch.dtype): Execution precision (e.g., torch.float32).
+        device (str): Target device ('cuda' or 'cpu').
 
-    Fix: load the pipeline in fp32 (the A40 has 48 GB, fp32 fits easily), apply
-    the PEFT LoRA on top without merging, and use torch.autocast only for the
-    actual denoising loop to keep inference fast.  Never call merge_adapter().
+    Returns:
+        StableDiffusionInpaintPipeline: The fully loaded pipeline ready for inference.
     """
     from diffusers import StableDiffusionInpaintPipeline
     from peft import PeftModel
@@ -153,16 +149,13 @@ def build_pipeline(
         safety_checker=None,
     )
 
+    # Apply LoRA weights
+    # Unet LoRA
     logger.info("Loading UNet LoRA weights …")
-    # Apply LoRA on top of the fp32 base — do NOT call merge_adapter().
-    pipe.unet = PeftModel.from_pretrained(
-        pipe.unet, unet_lora_path, is_trainable=False
-    )
-
+    pipe.unet = PeftModel.from_pretrained(pipe.unet, unet_lora_path, is_trainable=False)
+    # Text Encoder LoRA
     logger.info("Loading text encoder LoRA weights …")
-    pipe.text_encoder = PeftModel.from_pretrained(
-        pipe.text_encoder, te_lora_path, is_trainable=False
-    )
+    pipe.text_encoder = PeftModel.from_pretrained(pipe.text_encoder, te_lora_path, is_trainable=False)
 
     pipe = pipe.to(device)
     pipe.set_progress_bar_config(disable=True)
@@ -186,12 +179,8 @@ def generate_with_blended_latents(
     weight_dtype,
 ) -> torch.Tensor:
     """
-    Run SD2 inpainting and return a (3, H, W) tensor in [-1, 1].
-
-    Normalisation contract
-    ----------------------
-    Input  good_image : (3, H, W) float32 tensor in [-1, 1]
-    Input  mask       : (1, H, W) float32 tensor in {0, 1}  (1 = inpaint here)
+    Runs the SD2 inpainting generation and cleanly blends the generated defect 
+    back into the original unmasked background.
 
     The pipeline receives a PIL image (tensor_to_pil handles [-1,1] → [0,255])
     and a PIL mask.  We use output_type="pil" deliberately:
@@ -204,29 +193,27 @@ def generate_with_blended_latents(
       output_type="pil" always gives a uint8 PIL image in [0, 255] regardless
       of diffusers version.  We convert back to [-1,1] via pil_to_tensor.
 
-    The pipe is loaded in fp32 (LoRA was trained in fp32).  We wrap the call
-    in autocast so the denoising steps run in fp16 for speed while the model
-    weights stay in fp32.
+    Args:
+        pipe: The loaded Stable Diffusion pipeline.
+        good_image (torch.Tensor): The original defect-free image, shape (3, H, W) in [-1, 1].
+        mask (torch.Tensor): Binary mask indicating the defect region, shape (1, H, W) in {0, 1}.
+        prompt (str): Text conditioning for the generation.
+        num_inference_steps (int): Number of denoising steps.
+        guidance_scale (float): Classifier-free guidance scale.
+        generator (torch.Generator): Seeded random number generator.
+        
+    Returns:
+        torch.Tensor: The final composited image, shape (3, H, W) in [-1, 1].
     """
     H, W = good_image.shape[-2], good_image.shape[-1]
 
+    # Prepare inputs for the Diffusers pipeline
     # [-1,1] tensor → PIL [0,255]  (pipeline always takes PIL)
     img_pil  = tensor_to_pil(good_image.cpu())
     mask_np  = (mask.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
 
-    # Run pipeline in fp32, no outer autocast.
-    #
-    # Why no autocast:
-    #   The pipeline was loaded with torch_dtype=float32.  Wrapping it in an
-    #   autocast(fp16) context makes diffusers' internal dtype guards see fp16
-    #   activations where they expect fp32, which corrupts the VAE decode and
-    #   produces the wrong-colour "deep-fried" artefacts.
-    #
-    # Why output_type="pil":
-    #   output_type="pt" is unreliable across diffusers versions (some return
-    #   the raw VAE output in ~[-1,1]; others return normalised [0,1]).
-    #   PIL always gives a clean uint8 [0,255] image.
+    # Run pipeline
     result_pil = pipe(
         prompt=prompt,
         image=img_pil,
@@ -266,6 +253,10 @@ def generate_with_blended_latents(
 # ---------------------------------------------------------------------------
 
 def generate(cfg: GenerationConfig):
+    """
+    Main execution pipeline: Initializes the model, iterates over the dataset, 
+    generates defect candidates, and saves the best results.
+    """
     set_seed(cfg.seed)
     os.makedirs(cfg.output_dir, exist_ok=True)
 
@@ -292,9 +283,7 @@ def generate(cfg: GenerationConfig):
     prompt = make_object_prompt(cfg.object_name, cfg.placeholder_token)
     logger.info(f"Generation prompt: '{prompt}'")
 
-    # ------------------------------------------------------------------ #
     # Resolve good images
-    # ------------------------------------------------------------------ #
     from dataset import GoodImagesDataset, _resolve_good_dir, _list_images as _li
     good_dir = str(_resolve_good_dir(cfg.good_images_dir))
     good_paths = _li(good_dir)
@@ -344,7 +333,7 @@ def generate(cfg: GenerationConfig):
 
     _random.seed(cfg.seed)
     if mask_paths:
-        # ORIGINAL CODE
+        # VERSION 1:
         #n = len(mask_paths)
         #selected_good = _random.sample(good_paths, min(n, len(good_paths)))
         #pairs = list(zip(selected_good, mask_paths))
@@ -451,11 +440,9 @@ def generate(cfg: GenerationConfig):
         out_img_name = f"{bg_stem}_WITH_{mask_stem}_defect_{global_idx:04d}.png"
         out_img_path = os.path.join(cfg.output_dir, out_img_name)
 
-        # Save best image and its mask
-        #stem = Path(img_path).stem
-        #out_img_path = os.path.join(cfg.output_dir, f"{stem}_defect_{global_idx:04d}.png")
         out_mask_path = os.path.join(cfg.output_dir, f"{bg_stem}_WITH_{mask_stem}_mask_{global_idx:04d}.png")
-
+        
+        # Save best image and its mask
         save_image(best_img.squeeze(0).cpu(), out_img_path)
         mask_pil.save(out_mask_path)
 
@@ -467,10 +454,6 @@ def generate(cfg: GenerationConfig):
 
     logger.info(f"Generated {global_idx} defect images → '{cfg.output_dir}'")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     cfg = parse_args()

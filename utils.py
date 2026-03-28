@@ -116,64 +116,6 @@ def add_lora_to_text_encoder(
 
 
 # ---------------------------------------------------------------------------
-# Latent <-> image conversions
-# ---------------------------------------------------------------------------
-
-def encode_image(vae, image_tensor: torch.Tensor, weight_dtype) -> torch.Tensor:
-    """Encode (B, 3, H, W) image tensor to latent using VAE encoder."""
-    with torch.no_grad():
-        latent = vae.encode(image_tensor.to(dtype=weight_dtype)).latent_dist.sample()
-        latent = latent * vae.config.scaling_factor
-    return latent
-
-
-def decode_latent(vae, latent: torch.Tensor) -> torch.Tensor:
-    """Decode latent to (B, 3, H, W) image tensor in [-1, 1]."""
-    with torch.no_grad():
-        image = vae.decode(latent / vae.config.scaling_factor).sample
-    return image
-
-
-# ---------------------------------------------------------------------------
-# Prepare inpainting input tensors
-# ---------------------------------------------------------------------------
-
-def prepare_inpaint_latents(
-    vae,
-    image: torch.Tensor,
-    background: torch.Tensor,
-    mask: torch.Tensor,
-    noise_scheduler,
-    timestep: torch.Tensor,
-    noise: torch.Tensor,
-    weight_dtype,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Build x_t^inpaint = concat(x_t, b, M_resized).
-
-    Returns
-    -------
-    x_t         : noisy latent
-    b_latent    : background latent
-    mask_latent : mask downsampled to latent resolution
-    """
-    x0 = encode_image(vae, image, weight_dtype)
-    b_latent = encode_image(vae, background, weight_dtype)
-
-    # Add noise at the chosen timestep
-    x_t = noise_scheduler.add_noise(x0, noise, timestep)
-
-    # Resize mask to latent size
-    latent_h = x0.shape[-2]
-    latent_w = x0.shape[-1]
-    mask_latent = F.interpolate(
-        mask.float(), size=(latent_h, latent_w), mode="nearest"
-    ).to(dtype=weight_dtype)
-
-    return x_t, b_latent, mask_latent
-
-
-# ---------------------------------------------------------------------------
 # Low-Fidelity Selection (LFS)
 # ---------------------------------------------------------------------------
 

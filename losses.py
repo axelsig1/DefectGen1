@@ -18,68 +18,6 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Cross-attention map extraction utilities
-# ---------------------------------------------------------------------------
-
-class AttentionStore:
-    """
-    Hook manager that collects cross-attention maps from UNet *decoder* layers.
-
-    Usage
-    -----
-    store = AttentionStore()
-    store.register(unet)
-    # run unet forward pass …
-    attn_maps = store.get_and_clear()
-    store.remove()
-    """
-
-    def __init__(self):
-        self._hooks = []
-        self._maps: list = []
-
-    def _hook_fn(self, module, input, output):
-        # Attention processors return tensors or tuples; we want the attn weights.
-        # For diffusers' Attention module the weights are accessible via
-        # `output` when `return_attention_probs` is used, but in standard
-        # inference we tap into the forward call by monkey-patching (see below).
-        pass
-
-    def register(self, unet):
-        """
-        Register forward hooks on every cross-attention layer in the UNet
-        **decoder** (up_blocks).  We capture the attention weight tensor
-        produced for each token.
-        """
-        self._maps = []
-        self._hooks = []
-
-        def make_hook(layer_name: str):
-            def hook(module, args, kwargs, output):
-                # diffusers CrossAttention returns the hidden states as output;
-                # We capture attention probs if available via the module attribute.
-                if hasattr(module, "_attn_probs"):
-                    self._maps.append((layer_name, module._attn_probs.detach()))
-            return hook
-
-        # Patch the processor to expose attention probs
-        for name, module in unet.named_modules():
-            if "up_blocks" in name and hasattr(module, "get_attention_scores"):
-                h = module.register_forward_hook(make_hook(name), with_kwargs=True)
-                self._hooks.append(h)
-
-    def get_and_clear(self):
-        maps = list(self._maps)
-        self._maps = []
-        return maps
-
-    def remove(self):
-        for h in self._hooks:
-            h.remove()
-        self._hooks = []
-
-
-# ---------------------------------------------------------------------------
 # Attention map extraction via processor monkey-patch
 # ---------------------------------------------------------------------------
 
@@ -173,69 +111,6 @@ class AttnProbeProcessor:
 
         hidden_states = hidden_states / attn.rescale_output_factor
         return hidden_states
-
-
-# ---------------------------------------------------------------------------
-# Collect decoder cross-attention maps for [V*] token
-# ---------------------------------------------------------------------------
-
-def extract_vstar_attention_map(
-    unet,
-    latent_size: int,
-    vstar_token_index: int,
-    attn_store: list,
-) -> torch.Tensor:
-    """
-    Given the accumulated cross-attention maps in `attn_store` (collected
-    during a UNet forward pass on the *object* branch), extract and average
-    the maps for the [V*] token, then resize to latent_size × latent_size.
-
-    Returns
-    -------
-    A_vstar : (B, 1, latent_size, latent_size) tensor averaged over decoder heads.
-    """
-    maps = []
-    for attn_w in attn_store:
-        # attn_w shape: (batch * heads, spatial_tokens, text_tokens)
-        bh, spatial, text_len = attn_w.shape
-        # [V*] token map
-        if vstar_token_index >= text_len:
-            continue
-        vstar_map = attn_w[:, :, vstar_token_index]  # (bh, spatial)
-
-        # Infer spatial resolution
-        side = int(spatial ** 0.5)
-        if side * side != spatial:
-            continue  # skip non-square feature maps
-
-        # Reshape to (bh, 1, side, side)
-        vstar_map = vstar_map.view(bh, 1, side, side)
-
-        # Resize to target latent size
-        vstar_map = F.interpolate(
-            vstar_map.float(),
-            size=(latent_size, latent_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        maps.append(vstar_map)
-
-    if not maps:
-        return None
-
-    # Average across decoder layers (and implicitly over heads since bh includes them)
-    avg_map = torch.stack(maps, dim=0).mean(0)  # (bh, 1, H, W)
-
-    # Average over heads: first dim is batch*heads, reshape to (B, heads, 1, H, W)
-    # We don't know the number of heads directly, so we take the full mean
-    avg_map = avg_map.mean(0, keepdim=True)  # (1, 1, H, W) — simplified
-
-    # Normalise to [0, 1] for comparison with the binary mask
-    _min = avg_map.amin(dim=(-2, -1), keepdim=True)
-    _max = avg_map.amax(dim=(-2, -1), keepdim=True)
-    avg_map = (avg_map - _min) / (_max - _min + 1e-8)
-
-    return avg_map  # (1, 1, latent_H, latent_W)
 
 
 # ---------------------------------------------------------------------------

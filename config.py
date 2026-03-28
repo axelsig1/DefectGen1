@@ -15,7 +15,8 @@ class TrainingConfig:
     """Defect subfolder to train on (e.g. 'crack'). None = use all defect types."""
 
     object_name: str = "hazelnut"
-    """Human-readable name of the object, used in the object prompt P_obj."""
+    """Human-readable name of the object, used in the object prompt P_obj. As detailed as 
+    possible for niche objects, e.g.: "rough textured dark grey metallic surface"."""
 
     placeholder_token: str = "sks"
     """The [V*] special token that represents the defect concept."""
@@ -28,7 +29,7 @@ class TrainingConfig:
     lora_alpha: int = 16          # scaling factor
     lora_dropout: float = 0.1
 
-    # ---------- Optimisation ----------
+    # ---------- Optimization ----------
     train_steps: int = 2000
     warmup_steps: int = 100
     batch_size: int = 4
@@ -58,12 +59,6 @@ class TrainingConfig:
     rand_box_min_frac: float = 0.03
     rand_box_max_frac: float = 0.25
     """Box side length as fraction of the image size."""
-
-    # ---------- Inference / generation ----------
-    num_inference_steps: int = 50
-    guidance_scale: float = 7.5
-    num_samples_lfs: int = 8
-    """Number of samples to generate per (image, mask) pair for Low-Fidelity Selection."""
 
     # ---------- Misc ----------
     output_dir: str = "output"
@@ -109,7 +104,7 @@ class GenerationConfig:
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     num_samples_lfs: int = 8
-    """Samples per (image, mask) pair; best by LPIPS is kept."""
+    """Number of samples to generate per (image, mask) pair for Low-Fidelity Selection."""
 
     seed: int = 42
     mixed_precision: str = "fp16"

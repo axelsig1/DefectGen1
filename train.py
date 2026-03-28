@@ -38,7 +38,6 @@ from utils import (
     get_token_index,
     add_lora_to_unet,
     add_lora_to_text_encoder,
-    prepare_inpaint_latents,
     get_linear_warmup_scheduler,
 )
 
@@ -146,7 +145,7 @@ def train(cfg: TrainingConfig):
     )
 
     # ------------------------------------------------------------------ #
-    # 1. Load models
+    # Load models
     # ------------------------------------------------------------------ #
     tokenizer, text_encoder, vae, unet, noise_scheduler = load_models(cfg)
 
@@ -155,7 +154,7 @@ def train(cfg: TrainingConfig):
     vae.to(device, dtype=weight_dtype)
 
     # ------------------------------------------------------------------ #
-    # 2. Apply LoRA
+    # Apply LoRA
     # ------------------------------------------------------------------ #
     logger.info("Applying LoRA to UNet and text encoder …")
     unet = add_lora_to_unet(
@@ -189,7 +188,7 @@ def train(cfg: TrainingConfig):
     # unet.enable_gradient_checkpointing()  # <-- do not re-enable
 
     # ------------------------------------------------------------------ #
-    # 3. Dataset & DataLoader
+    # Dataset & DataLoader
     # ------------------------------------------------------------------ #
     logger.info(f"Loading dataset from: {cfg.data_root}")
     dataset = DefectFillDataset(
@@ -215,7 +214,7 @@ def train(cfg: TrainingConfig):
     )
 
     # ------------------------------------------------------------------ #
-    # 4. Optimiser (separate LRs for UNet and text encoder)
+    # Optimiser (separate LRs for UNet and text encoder)
     # ------------------------------------------------------------------ #
     unet_params = [p for p in unet.parameters() if p.requires_grad]
     te_params = [p for p in text_encoder.parameters() if p.requires_grad]
@@ -232,7 +231,7 @@ def train(cfg: TrainingConfig):
     scheduler = get_linear_warmup_scheduler(optimizer, cfg.warmup_steps, cfg.train_steps)
 
     # ------------------------------------------------------------------ #
-    # 5. Build text embeddings (pre-computed once per step to save time)
+    # Build text embeddings (pre-computed once per step to save time)
     # ------------------------------------------------------------------ #
     p_def = make_defect_prompt(cfg.placeholder_token)
     p_obj = make_object_prompt(cfg.object_name, cfg.placeholder_token)
@@ -242,7 +241,7 @@ def train(cfg: TrainingConfig):
     logger.info(f"Object prompt : '{p_obj}' (V* at index {vstar_idx_obj})")
 
     # ------------------------------------------------------------------ #
-    # 6. Attention probe setup (decoder layers only)
+    # Attention probe setup (decoder layers only)
     # ------------------------------------------------------------------ #
     # We install custom processors to capture cross-attention maps during
     # the object-branch forward pass.
@@ -263,7 +262,7 @@ def train(cfg: TrainingConfig):
                 module.set_processor(AttnProcessor2_0())
 
     # ------------------------------------------------------------------ #
-    # 7. Training loop
+    # Training loop
     # ------------------------------------------------------------------ #
     global_step = 0
     epoch = 0
@@ -518,10 +517,6 @@ def save_checkpoint(unet, text_encoder, output_dir: str, step: int, final: bool 
     text_encoder.save_pretrained(te_path)
     logger.info(f"Checkpoint saved at step {step} → {output_dir}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     cfg = parse_args()
