@@ -340,12 +340,49 @@ def generate(cfg: GenerationConfig):
     # samples and apply each mask ~30 times), we randomly select exactly N
     # good images — one per mask — so the total output is N images.
     import random as _random
+    import itertools
+
     _random.seed(cfg.seed)
     if mask_paths:
-        n = len(mask_paths)
-        selected_good = _random.sample(good_paths, min(n, len(good_paths)))
-        pairs = list(zip(selected_good, mask_paths))
-        logger.info(f"Paired {len(pairs)} masks with {len(pairs)} randomly selected good images.")
+        # ORIGINAL CODE
+        #n = len(mask_paths)
+        #selected_good = _random.sample(good_paths, min(n, len(good_paths)))
+        #pairs = list(zip(selected_good, mask_paths))
+        #logger.info(f"Paired {len(pairs)} masks with {len(pairs)} randomly selected good images.")
+        
+        # VERSION 2:
+        # Create a Cartesian product: Every good image paired with every mask
+        #pairs = list(itertools.product(good_paths, mask_paths))
+        #logger.info(f"Created {len(pairs)} combinations from {len(good_paths)} good images and {len(mask_paths)} masks.")
+
+        # VERSION 3:
+        # --- 1. Filter masks down to unique physical cracks ---
+        unique_mask_paths = []
+        seen_cracks = set()
+
+        for path in mask_paths:
+            # e.g., "loc1_uvS1_he_crack_00"
+            stem = path.stem
+            parts = stem.split('_')
+
+            # Ensure the filename has enough parts to be tokenized correctly
+            if len(parts) >= 5:
+                # Unique fingerprint: Surface + DefectType + DefectID (e.g., "loc1_crack_00")
+                unique_id = f"{parts[0]}_{parts[-2]}_{parts[-1]}"
+            else:
+                # Fallback just in case a file has a weird name
+                unique_id = stem
+
+            if unique_id not in seen_cracks:
+                seen_cracks.add(unique_id)
+                unique_mask_paths.append(path)
+
+        logger.info(f"Filtered {len(mask_paths)} lighting variations down to {len(unique_mask_paths)} unique physical cracks.")
+
+        # --- 2. Create the Cartesian Product ---
+        # Now it pairs every good image ONLY with the 18 unique masks
+        pairs = list(itertools.product(good_paths, unique_mask_paths))
+        logger.info(f"Created {len(pairs)} combinations from {len(good_paths)} good images and {len(unique_mask_paths)} unique masks.")
     else:
         # No masks: generate one sample per good image with a random mask each
         pairs = [(gp, None) for gp in good_paths]
@@ -406,10 +443,18 @@ def generate(cfg: GenerationConfig):
             mask=mask_tensor.to(device),
         )
 
+        # Extract the stems for both background and mask
+        bg_stem = Path(img_path).stem
+        mask_stem = Path(mask_path).stem if mask_path is not None else "random"
+
+        # Create the comprehensive filename
+        out_img_name = f"{bg_stem}_WITH_{mask_stem}_defect_{global_idx:04d}.png"
+        out_img_path = os.path.join(cfg.output_dir, out_img_name)
+
         # Save best image and its mask
-        stem = Path(img_path).stem
-        out_img_path = os.path.join(cfg.output_dir, f"{stem}_defect_{global_idx:04d}.png")
-        out_mask_path = os.path.join(cfg.output_dir, f"{stem}_mask_{global_idx:04d}.png")
+        #stem = Path(img_path).stem
+        #out_img_path = os.path.join(cfg.output_dir, f"{stem}_defect_{global_idx:04d}.png")
+        out_mask_path = os.path.join(cfg.output_dir, f"{bg_stem}_WITH_{mask_stem}_mask_{global_idx:04d}.png")
 
         save_image(best_img.squeeze(0).cpu(), out_img_path)
         mask_pil.save(out_mask_path)

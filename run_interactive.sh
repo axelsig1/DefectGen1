@@ -26,7 +26,7 @@ DATA="$ROOT/Data"
 # -----------------------------------------------------------------------------
 # 2. Once the shell opens on the compute node — activate your environment
 # -----------------------------------------------------------------------------
-source $ROOT/Models/defectgen_env/bin/activate   # adjust path if your venv lives elsewhere
+source $ROOT/envs/defectgen_env/bin/activate   # adjust path if your venv lives elsewhere
 
 
 # -----------------------------------------------------------------------------
@@ -47,25 +47,27 @@ cd $MODEL
 # -----------------------------------------------------------------------------
 python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
 
-
+MODEL="cwp_uv_model_1"
+STEP="1000"
+CFG=1.8
 # -----------------------------------------------------------------------------
 # 7. After training — run generation
 # -----------------------------------------------------------------------------
 python -u generate.py \
     --pretrained_model_name  sd2-community/stable-diffusion-2-inpainting \
-    --lora_weights_path      /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/hazelnut_model_2/unet_lora_final \
-    --te_lora_weights_path   /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/hazelnut_model_2/text_encoder_lora_final \
-    --good_images_dir        $DATA/MVTec_new/hazelnut/test/good \
-    --data_root              $DATA/MVTec_new/hazelnut \
-    --output_dir             /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/generated/hazelnut_model_2_ckpt2000_cfg7.5 \
-    --object_name            hazelnut \
-    --defect_type            crack \
+    --lora_weights_path      /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/$MODEL/unet_lora_step_${STEP} \
+    --te_lora_weights_path   /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/$MODEL/text_encoder_lora_step_${STEP} \
+    --good_images_dir        $DATA/cwp_dataset/test/good \
+    --data_root              $DATA/cwp_dataset \
+    --output_dir             /mimer/NOBACKUP/groups/cast_fm/axel/Data/Generated_data/obj2_uv/${MODEL}_ckpt${STEP}_cfg${CFG} \
+    --object_name            "dark grayscale metallic surface" \
+    --defect_type            obj2 \
     --num_inference_steps    50 \
-    --guidance_scale         7.5 \
-    --num_samples_lfs        2 \
+    --guidance_scale         $CFG \
+    --num_samples_lfs        4 \
     --mixed_precision        bf16 \
     --split_seed             42 \
-    --train_fraction         0.3333 \
+    --train_fraction         0.0 \
     --seed                   42 \
-    --mask_dilation_size     3 \
+    --mask_dilation_size     0 \
     --mask_blur_radius       5

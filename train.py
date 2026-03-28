@@ -194,6 +194,7 @@ def train(cfg: TrainingConfig):
     logger.info(f"Loading dataset from: {cfg.data_root}")
     dataset = DefectFillDataset(
         data_root=cfg.data_root,
+        split="train",
         defect_type=cfg.defect_type,
         image_size=cfg.image_size,
         resize_min=cfg.resize_min,

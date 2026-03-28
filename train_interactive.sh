@@ -26,7 +26,7 @@ DATA="$ROOT/Data"
 # -----------------------------------------------------------------------------
 # 2. Once the shell opens on the compute node — activate your environment
 # -----------------------------------------------------------------------------
-source $ROOT/Models/defectgen_env/bin/activate   # adjust path if your venv lives elsewhere
+source $ROOT/envs/defectgen_env/bin/activate   # adjust path if your venv lives elsewhere
 
 
 # -----------------------------------------------------------------------------
@@ -53,12 +53,13 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:'
 #    -u flag = unbuffered (belt-and-suspenders alongside PYTHONUNBUFFERED)
 # -----------------------------------------------------------------------------
 python -u train.py \
-    --data_root        $DATA/MVTec_new/hazelnut \
-    --defect_type      crack \
-    --object_name      hazelnut \
-    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/hazelnut_model_2 \
+    --data_root        $DATA/cwp_dataset \
+    --defect_type      obj2_uv \
+    --object_name      "rough textured dark grayscale metallic surface" \
+    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/cwp_uv_model_1 \
     --pretrained_model_name sd2-community/stable-diffusion-2-inpainting \
-    --train_steps      2000 \
+    --train_steps      1500 \
+    --save_steps       250 \
     --batch_size       4 \
     --unet_lr          2e-4 \
     --text_encoder_lr  4e-5 \

@@ -15,7 +15,7 @@ export PYTHONUNBUFFERED=1
 ROOT="/mimer/NOBACKUP/groups/cast_fm/axel"
 MODEL_DIR="$ROOT/Models/DefectGen1"
 DATA="$ROOT/Data"
-ENV="$ROOT/Models/defectgen_env"
+ENV="$ROOT/envs/defectgen_env"
 
 source "$ENV/bin/activate"
 cd "$MODEL_DIR"
