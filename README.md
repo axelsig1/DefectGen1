@@ -184,6 +184,3 @@ L_ours = 0.5·L_def + 0.2·L_obj + 0.05·L_attn
   year={2024}
 }
 ```
-
-
-## test  change
