@@ -28,9 +28,17 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+
+# For validation loss
+import lpips
+from diffusers import StableDiffusionInpaintPipeline, DPMSolverMultistepScheduler
+import torchvision.transforms.functional as TF
+
+
 from config import TrainingConfig
-from dataset import DefectFillDataset
+from dataset import DefectFillDataset, GoodImagesDataset
 from losses import defectfill_loss, AttnProbeProcessor
+from torch.utils.tensorboard import SummaryWriter   # Tensorboard for loss plots
 from utils import (
     set_seed,
     make_defect_prompt,
@@ -39,6 +47,9 @@ from utils import (
     add_lora_to_unet,
     add_lora_to_text_encoder,
     get_linear_warmup_scheduler,
+    compute_lpips_in_mask,      # val loss
+    tensor_to_pil,              # val loss
+    pil_to_tensor,              # val loss
 )
 
 logging.basicConfig(
@@ -127,6 +138,101 @@ def load_models(cfg: TrainingConfig):
     )
 
     return tokenizer, text_encoder, vae, unet, noise_scheduler
+
+
+def log_validation(
+    vae, text_encoder, tokenizer, unet, cfg, device, weight_dtype, 
+    tb_writer, global_step, val_dataset, val_good_dataset, lpips_fn
+):
+    logger.info(f"Running validation at step {global_step}...")
+    
+    # 1. Freeze models temporarily
+    unet.eval()
+    text_encoder.eval()
+
+    # 2. Build a temporary, fast pipeline using the currently loaded weights
+    val_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+        cfg.pretrained_model_name, subfolder="scheduler"
+    )
+    pipe = StableDiffusionInpaintPipeline(
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        scheduler=val_scheduler,
+        safety_checker=None,
+        feature_extractor=None,
+    ).to(device)
+    pipe.set_progress_bar_config(disable=True)
+
+    # 3. Grab the Ground Truth defect and mask
+    val_sample = val_dataset[0] 
+    gt_tensor = val_sample["image"].unsqueeze(0).to(device)   # Ground Truth defective image
+    mask_tensor = val_sample["mask"].unsqueeze(0).to(device)  # Ground Truth mask
+    
+    # 4. Grab a totally clean background image to use as our canvas
+    good_img_tensor, _ = val_good_dataset[0]
+    good_tensor = good_img_tensor.unsqueeze(0).to(device)     # Clean metal surface
+    
+    prompt = make_object_prompt(cfg.object_name, cfg.placeholder_token)
+    generator = torch.Generator(device=device).manual_seed(cfg.seed)
+
+    with torch.no_grad():
+        with torch.amp.autocast('cuda', enabled=(cfg.mixed_precision != "no")):
+            # Convert CLEAN image and mask for pipeline
+            img_pil = tensor_to_pil(good_tensor.squeeze(0).cpu())
+            mask_pil = TF.to_pil_image(mask_tensor.squeeze(0).cpu())
+
+            # Generate the crack onto the CLEAN image
+            result_pil = pipe(
+                prompt=prompt,
+                image=img_pil,
+                mask_image=mask_pil,
+                height=cfg.image_size,
+                width=cfg.image_size,
+                num_inference_steps=20, # Fast inference
+                guidance_scale=7.5,
+                generator=generator,
+                output_type="pil",
+            ).images[0]
+
+            result_tensor = pil_to_tensor(result_pil).unsqueeze(0).to(device)
+
+            # Enforce background paste-back using the CLEAN background
+            mask_3ch = mask_tensor.expand_as(result_tensor)
+            final_composite = result_tensor * mask_3ch + good_tensor * (1.0 - mask_3ch)
+
+            # 5. Calculate Masked LPIPS
+            # To prevent LPIPS from measuring the difference between the clean canvas 
+            # background and the Ground Truth background inside the bounding box, 
+            # we temporarily paste the generated crack onto the Ground Truth background.
+            
+            lpips_eval_tensor = result_tensor * mask_3ch + gt_tensor * (1.0 - mask_3ch)
+
+            # Now, the backgrounds are 100% identical. The bounding-box LPIPS will 
+            # STRICTLY measure the perceptual difference of the crack itself.
+            
+            # Compare generated image (on clean background) vs Ground Truth (original defect)
+            lpips_score = compute_lpips_in_mask(
+                lpips_fn, lpips_eval_tensor, gt_tensor, mask_tensor
+            )
+
+    # 6. Log to TensorBoard
+    tb_writer.add_scalar("Validation/Masked_LPIPS", lpips_score, global_step)
+    
+    # Convert from [-1, 1] to [0, 1] for TensorBoard image logging
+    display_img = (final_composite.squeeze(0) + 1.0) / 2.0
+    tb_writer.add_image("Validation/Generated_Defect", display_img, global_step)
+
+    # 7. Unfreeze models and resume training
+    unet.train()
+    text_encoder.train()
+    
+    # Free up memory
+    del pipe
+    torch.cuda.empty_cache()
+    
+    logger.info(f"Validation complete. LPIPS: {lpips_score:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +373,34 @@ def train(cfg: TrainingConfig):
     global_step = 0
     epoch = 0
     progress_bar = tqdm(total=cfg.train_steps, desc="Training")
+
+
+
+    # Initialize TensorBoard Writer
+    tb_writer = SummaryWriter(log_dir=os.path.join(cfg.output_dir, "logs"))
+
+    # --- Setup Validation ---
+    logger.info("Initializing Validation metrics...")
+    val_lpips_fn = lpips.LPIPS(net="alex").to(device)
+    val_lpips_fn.requires_grad_(False)
+    
+    # Load the test split for validation (no augmentation!)
+    val_dataset = DefectFillDataset(
+        data_root=cfg.data_root,
+        split="test",
+        defect_type=cfg.defect_type,
+        image_size=cfg.image_size,
+        augment=False 
+    )
+
+    # NEW: Load the good/clean images to act as our blank canvas
+    # (dataset.py auto-resolves cfg.data_root to find the 'test/good' folder)
+    val_good_dataset = GoodImagesDataset(
+        good_dir=cfg.data_root, 
+        image_size=cfg.image_size
+    )
+
+
 
     # Mixed precision scaler
     scaler = torch.amp.GradScaler('cuda', enabled=(cfg.mixed_precision == "fp16"))
@@ -421,10 +555,32 @@ def train(cfg: TrainingConfig):
                     f"attn={losses['l_attn'].item() if hasattr(losses['l_attn'], 'item') else 0.0:.4f})"
                 )
 
+
+
+                # Write to TensorBoard
+                tb_writer.add_scalar("Loss/Total", loss.item(), global_step)
+                tb_writer.add_scalar("Loss/Defect", losses['l_def'].item(), global_step)
+                tb_writer.add_scalar("Loss/Object", losses['l_obj'].item(), global_step)
+                
+                # Handle l_attn which might be a float 0.0 if not computed
+                attn_val = losses['l_attn'].item() if isinstance(losses['l_attn'], torch.Tensor) else losses['l_attn']
+                tb_writer.add_scalar("Loss/Attention", attn_val, global_step)
+                tb_writer.add_scalar("Learning_Rate", lr_unet, global_step)
+
+
+
             if global_step % cfg.save_steps == 0:
                 save_checkpoint(unet, text_encoder, cfg.output_dir, global_step)
+            
+                # --- Run Live Validation ---
+                log_validation(
+                        vae, text_encoder, tokenizer, unet, cfg, device, weight_dtype, 
+                        tb_writer, global_step, val_dataset, val_good_dataset, val_lpips_fn
+                    )
 
     progress_bar.close()
+
+    tb_writer.close()
 
     # Final save
     save_checkpoint(unet, text_encoder, cfg.output_dir, global_step, final=True)

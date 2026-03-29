@@ -50,9 +50,9 @@ python -u train.py \
     --data_root        $DATA/cwp_dataset \
     --defect_type      obj2 \
     --object_name      "rough textured dark grayscale metallic surface" \
-    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/cwp_uv_model_2 \
+    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/cwp_uv_model_3\
     --pretrained_model_name sd2-community/stable-diffusion-2-inpainting \
-    --train_steps      2000 \
+    --train_steps      2500 \
     --save_steps       250 \
     --batch_size       4 \
     --unet_lr          2e-4 \

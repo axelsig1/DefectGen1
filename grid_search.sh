@@ -23,7 +23,7 @@ cd "$MODEL_DIR"
 # ---------- edit these to match your run ----------
 OBJECT="hazelnut"
 DEFECT="crack"
-TRAIN_RUN="/mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/hazelnut_model_2"          # folder from train.py --output_dir
+TRAIN_RUN="/mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/cwp_uv_model_2"          # folder from train.py --output_dir
 DATA_ROOT="$DATA/MVTec_new/$OBJECT"
 GOOD_DIR="$DATA/MVTec_new/$OBJECT/test/good"
 MODEL="sd2-community/stable-diffusion-2-inpainting"
@@ -32,8 +32,8 @@ LFS_SAMPLES=4                                  # 4 samples per mask (was 8)
 STEPS=50
 # ---------------------------------------------------
 
-CHECKPOINTS=("final")
-CFGS=(1.0 2.5 3.5 5.0 7.5)
+CHECKPOINTS=("750" "1000" "1250" "1500" "1750" "final")
+CFGS=(2.5 5.0)
 
 echo "Grid search: ${#CHECKPOINTS[@]} checkpoints × ${#CFGS[@]} CFG values"
 echo "LFS samples per mask : $LFS_SAMPLES"
