@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH -A NAISS2026-4-280
-#SBATCH --gpus-per-node=A40:1
-#SBATCH -t 0-00:10:00              # Set to 2 hours based on your interactive salloc request
-#SBATCH -J defectfill_gen
-#SBATCH --output=/mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/logs/defectfill_gen_%j.out
-
 
 # =============================================================================
 # DefectFill — Slurm Batch Generation Job
-# Account: NAISS2026-4-280  |  GPU: A40  |  Env: defectgen_env
 # =============================================================================
 
 

@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH -A NAISS2026-4-280
-#SBATCH --gpus-per-node=A40:1
-#SBATCH -t 0-02:00:00              # Set to 2 hours based on your interactive salloc request
-#SBATCH -J defectfill_gen
-#SBATCH --output=/mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/logs/defectfill_train_%j.out
-
 
 # =============================================================================
 # DefectFill — Slurm Batch Generation Job
-# Account: NAISS2026-4-280  |  GPU: A40  |  Env: defectgen_env
 # =============================================================================
 
 
@@ -24,27 +17,25 @@ source $ROOT/envs/defectgen_env/bin/activate   # adjust path if your venv lives 
 
 
 # -----------------------------------------------------------------------------
-# 3. Fix: force Python to flush output immediately.
-#    This is why you see nothing — Python buffers stdout when not in a TTY.
+# Force Python to flush output immediately.
 # -----------------------------------------------------------------------------
 export PYTHONUNBUFFERED=1
 
 
 # -----------------------------------------------------------------------------
-# 4. Go to your project directory (adjust path if different)
+#  Go to your project directory (adjust path if different)
 # -----------------------------------------------------------------------------
 cd $MODEL
 
 
 # -----------------------------------------------------------------------------
-# 5. Quick sanity check — confirm GPU is visible before launching training
+# Quick sanity check — confirm GPU is visible before launching training
 # -----------------------------------------------------------------------------
 python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
 
 
 # -----------------------------------------------------------------------------
-# 6. Run training
-#    -u flag = unbuffered (belt-and-suspenders alongside PYTHONUNBUFFERED)
+# Run training
 # -----------------------------------------------------------------------------
 python -u train.py \
     --data_root        $DATA/cwp_dataset \

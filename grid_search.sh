@@ -2,12 +2,7 @@
 # =============================================================================
 # DefectFill — Grid Search: checkpoint × CFG scale
 # =============================================================================
-# Tests 3 saved checkpoints against 3 CFG values → 9 output folders.
-# Each folder contains exactly N images (one per test mask).
-#
-# Usage (from your interactive session):
-#   bash grid_search.sh
-# =============================================================================
+
 
 set -euo pipefail
 export PYTHONUNBUFFERED=1
