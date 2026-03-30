@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
+
 # =============================================================================
 # DefectFill — Slurm Batch Generation Job
+# Account: NAISS2026-4-280  |  GPU: A40  |  Env: defectgen_env
 # =============================================================================
 
 
@@ -35,9 +37,9 @@ VENV_PYTHON="$ROOT/envs/defectgen_env/bin/python"
 # -----------------------------------------------------------------------------
 $VENV_PYTHON -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
 
-MODEL="cwp_uv_model_2"
+MODEL="cwp_uv_model_3"
 STEP="1750"
-CFG=2.0
+CFG=7.5
 # -----------------------------------------------------------------------------
 # Run generation
 # -----------------------------------------------------------------------------
@@ -47,10 +49,10 @@ $VENV_PYTHON -u generate.py \
     --te_lora_weights_path   /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/$MODEL/text_encoder_lora_step_${STEP} \
     --good_images_dir        $DATA/cwp_dataset/test/good \
     --data_root              $DATA/cwp_dataset \
-    --output_dir             /mimer/NOBACKUP/groups/cast_fm/axel/Data/Generated_data/obj2_uv/${MODEL}_ckpt${STEP}_cfg${CFG} \
+    --output_dir             /mimer/NOBACKUP/groups/cast_fm/axel/Data/Generated_data/obj2_uv/${MODEL}_ckpt${STEP}_cfg${CFG}_DPMsolver \
     --object_name            "rough textured dark grayscale metallic surface" \
     --defect_type            obj2 \
-    --num_inference_steps    50 \
+    --num_inference_steps    25 \
     --guidance_scale         $CFG \
     --num_samples_lfs        4 \
     --mixed_precision        bf16 \

@@ -138,13 +138,20 @@ def build_pipeline(
     Returns:
         StableDiffusionInpaintPipeline: The fully loaded pipeline ready for inference.
     """
-    from diffusers import StableDiffusionInpaintPipeline
+    from diffusers import StableDiffusionInpaintPipeline, DPMSolverMultistepScheduler
     from peft import PeftModel
 
     logger.info(f"Loading pipeline from: {pretrained_model}")
+
+    # NEW better and faster DPM-solver instead of SD2 standard DDIM/PNDM
+    dpm_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+        pretrained_model, subfolder="scheduler"
+    )
+
     # Load base pipeline in fp32 — dtype must match what LoRA was trained with.
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         pretrained_model,
+        scheduler=dpm_scheduler,    # Inject DPM
         torch_dtype=torch.float32,   # fp32, same as training
         safety_checker=None,
     )
