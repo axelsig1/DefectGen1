@@ -90,6 +90,7 @@ def parse_args() -> GenerationConfig:
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
     parser.add_argument("--num_samples_lfs", type=int, default=8)
+    parser.add_argument("--max_generations", type=int, default=0, help="Max images to generate (0 for all)")
     parser.add_argument("--mask_dilation_size", type=int, default=0, help="Thickens the mask to prevent losing thin defects.")
     parser.add_argument("--mask_blur_radius", type=int, default=0, help="Blurs the mask edges for seamless blending.")
     parser.add_argument("--seed", type=int, default=42)
@@ -388,6 +389,11 @@ def generate(cfg: GenerationConfig):
     # Generation loop
     # ------------------------------------------------------------------ #
     global_idx = 0
+
+    if cfg.max_generations > 0:
+        pairs = pairs[:cfg.max_generations]
+        logger.info(f"Limiting generation to {cfg.max_generations} images.")
+
     for img_path, mask_path in tqdm(pairs, desc="Generating"):
         img_pil = Image.open(img_path).convert("RGB").resize(
             (cfg.image_size, cfg.image_size), Image.LANCZOS

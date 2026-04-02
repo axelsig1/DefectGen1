@@ -101,6 +101,9 @@ class GenerationConfig:
     output_dir: str = "generated"
     image_size: int = 512
 
+    max_generations: int = 0
+    """Maximum number of images to generate. 0 means generate all available pairs."""
+    
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     num_samples_lfs: int = 8
