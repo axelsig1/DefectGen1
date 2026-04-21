@@ -68,6 +68,8 @@ def parse_args() -> TrainingConfig:
     parser = argparse.ArgumentParser(description="Train DefectFill")
     # Data
     parser.add_argument("--data_root", type=str, required=True)
+    parser.add_argument("--train_fraction", type=float, default=1.0/3.0, 
+                        help="Fraction of dataset to use for training (default 1/3)")
     parser.add_argument("--object_name", type=str, required=True)
     parser.add_argument("--defect_type", type=str, default=None,
                         help="Defect subfolder, e.g. crack. Omit to use all types.")
@@ -299,6 +301,7 @@ def train(cfg: TrainingConfig):
     logger.info(f"Loading dataset from: {cfg.data_root}")
     dataset = DefectFillDataset(
         data_root=cfg.data_root,
+        train_fraction=cfg.train_fraction,
         split="train",
         defect_type=cfg.defect_type,
         image_size=cfg.image_size,
@@ -387,6 +390,7 @@ def train(cfg: TrainingConfig):
     # Load the test split for validation (no augmentation!)
     val_dataset = DefectFillDataset(
         data_root=cfg.data_root,
+        train_fraction=cfg.train_fraction,
         split="test",
         defect_type=cfg.defect_type,
         image_size=cfg.image_size,

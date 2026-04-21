@@ -11,6 +11,9 @@ class TrainingConfig:
     data_root: str = "data"
     """Root directory containing 'defective', 'defective_masks', and 'good' sub-folders."""
 
+    train_fraction: float = 1.0 / 3.0
+    """What fraction of the dataset should be used for training"""
+
     defect_type: Optional[str] = None
     """Defect subfolder to train on (e.g. 'crack'). None = use all defect types."""
 
