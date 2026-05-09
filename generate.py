@@ -35,6 +35,10 @@ from PIL import Image
 from tqdm.auto import tqdm
 from PIL import ImageFilter
 
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+from losses import AttnProbeProcessor
+
 from config import GenerationConfig
 from dataset import GoodImagesDataset, _list_images, _load_mask
 from utils import (
@@ -177,51 +181,39 @@ def build_pipeline(
 
 def generate_with_blended_latents(
     pipe,
-    good_image: torch.Tensor,       # (3, H, W) in [-1, 1]
-    mask: torch.Tensor,             # (1, H, W) in {0, 1}
+    good_image: torch.Tensor,
+    mask: torch.Tensor,
     prompt: str,
     num_inference_steps: int,
     guidance_scale: float,
     generator: torch.Generator,
     device,
     weight_dtype,
-) -> torch.Tensor:
-    """
-    Runs the SD2 inpainting generation and cleanly blends the generated defect 
-    back into the original unmasked background.
-
-    The pipeline receives a PIL image (tensor_to_pil handles [-1,1] → [0,255])
-    and a PIL mask.  We use output_type="pil" deliberately:
-
-      output_type="pt"  is unreliable across diffusers versions — some return
-      the raw VAE decode in ~[-1,1], others normalise to [0,1].  Applying
-      * 2 - 1 to a [-1,1] tensor gives [-3, 1], which produces the blown-out,
-      over-saturated "deep-fried" artefacts.
-
-      output_type="pil" always gives a uint8 PIL image in [0, 255] regardless
-      of diffusers version.  We convert back to [-1,1] via pil_to_tensor.
-
-    Args:
-        pipe: The loaded Stable Diffusion pipeline.
-        good_image (torch.Tensor): The original defect-free image, shape (3, H, W) in [-1, 1].
-        mask (torch.Tensor): Binary mask indicating the defect region, shape (1, H, W) in {0, 1}.
-        prompt (str): Text conditioning for the generation.
-        num_inference_steps (int): Number of denoising steps.
-        guidance_scale (float): Classifier-free guidance scale.
-        generator (torch.Generator): Seeded random number generator.
-        
-    Returns:
-        torch.Tensor: The final composited image, shape (3, H, W) in [-1, 1].
-    """
+    placeholder_token: str = "sks",
+) -> tuple[torch.Tensor, np.ndarray]:
+    
     H, W = good_image.shape[-2], good_image.shape[-1]
-
-    # Prepare inputs for the Diffusers pipeline
-    # [-1,1] tensor → PIL [0,255]  (pipeline always takes PIL)
     img_pil  = tensor_to_pil(good_image.cpu())
     mask_np  = (mask.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
     mask_pil = Image.fromarray(mask_np)
 
-    # Run pipeline
+    # 1. Setup Attention Probes
+    attn_store = []
+
+    def set_attn_processors(model, store):
+        for name, module in model.named_modules():
+            if "up_blocks" in name and hasattr(module, "set_processor"):
+                module.set_processor(AttnProbeProcessor(store))
+
+    def reset_attn_processors(model):
+        from diffusers.models.attention_processor import AttnProcessor2_0
+        for name, module in model.named_modules():
+            if "up_blocks" in name and hasattr(module, "set_processor"):
+                module.set_processor(AttnProcessor2_0())
+
+    set_attn_processors(pipe.unet, attn_store)
+
+    # 2. Run Pipeline
     result_pil = pipe(
         prompt=prompt,
         image=img_pil,
@@ -232,29 +224,58 @@ def generate_with_blended_latents(
         guidance_scale=guidance_scale,
         generator=generator,
         output_type="pil",
-    ).images[0]   # PIL Image [0, 255]
+    ).images[0]
 
-    # PIL [0,255] → float tensor [-1,1]
-    result = pil_to_tensor(result_pil).to(good_image.device)  # (3, H, W)
+    reset_attn_processors(pipe.unet)
 
-    # -------------------------------------------------------------------
-    # Background paste-back (critical for inpainting quality)
-    # -------------------------------------------------------------------
-    # The pipeline decodes the full latent through the VAE at the end.
-    # VAE encode→decode is lossy: background pixels drift slightly, and
-    # strong LoRA defect signals bleed into surrounding areas through the
-    # convolutional layers.  Explicitly restoring the original pixels in
-    # the non-masked region gives pixel-perfect background preservation,
-    # which is also what the paper means by "replacing background latents
-    # during inference".
-    #
-    #   mask  : (1, H, W) in {0, 1} — 1 = defect region, 0 = background
-    #   result_final = result  × mask  +  original × (1 − mask)
-    mask_3ch = mask.to(result.device).expand_as(result)   # (3, H, W)
+    # 3. Extract the Map
+    token_ids = pipe.tokenizer.encode(prompt)
+    sks_id = pipe.tokenizer.convert_tokens_to_ids(placeholder_token)
+    try:
+        vstar_idx = token_ids.index(sks_id)
+    except ValueError:
+        vstar_idx = -1
+
+    heatmap = None
+    if vstar_idx != -1 and len(attn_store) > 0:
+        maps = []
+        for attn_w in attn_store:
+            bh, spatial, text_len = attn_w.shape
+            if vstar_idx >= text_len: continue
+            
+            side = int(spatial ** 0.5)
+            if side * side != spatial: continue
+            
+            # CFG duplicates the batch (unconditional + conditional)
+            batch_size = 2 
+            if bh % batch_size != 0: continue
+                
+            heads = bh // batch_size
+            token_map = attn_w[:, :, vstar_idx].view(batch_size, heads, side, side)
+            
+            # Extract conditional pass (index 1) and average across heads
+            cond_map = token_map[1:2].mean(dim=1, keepdim=True)
+            cond_map = F.interpolate(
+                cond_map.float(), size=(H, W), mode="bilinear", align_corners=False
+            )
+            maps.append(cond_map)
+            
+        if maps:
+            # Average across decoder layers and steps, then normalize
+            avg_map = torch.stack(maps, dim=0).mean(0)
+            _min = avg_map.amin(dim=(-2, -1), keepdim=True)
+            _max = avg_map.amax(dim=(-2, -1), keepdim=True)
+            avg_map = (avg_map - _min) / (_max - _min + 1e-8)
+            heatmap = avg_map.squeeze().cpu().numpy()
+
+    attn_store.clear()
+
+    # 4. Background paste-back
+    result = pil_to_tensor(result_pil).to(good_image.device)
+    mask_3ch = mask.to(result.device).expand_as(result)
     result = result * mask_3ch + good_image.to(result.device) * (1.0 - mask_3ch)
 
-    return result    # (3, H, W) in [-1, 1]
-
+    return result, heatmap
 
 # ---------------------------------------------------------------------------
 # Main generation loop
@@ -284,8 +305,11 @@ def generate(cfg: GenerationConfig):
         device,
     )
 
-    # LPIPS for Low-Fidelity Selection
-    lpips_fn = lpips.LPIPS(net="alex").to(device)
+    # LPIPS for Low-Fidelity Selection (ONLY load if we are actually comparing samples)
+    if cfg.num_samples_lfs > 1:
+        lpips_fn = lpips.LPIPS(net="alex").to(device)
+    else:
+        lpips_fn = None
 
     # Object prompt
     prompt = make_object_prompt(cfg.object_name, cfg.placeholder_token)
@@ -420,11 +444,16 @@ def generate(cfg: GenerationConfig):
         mask_arr = np.array(mask_pil)
         mask_tensor = torch.from_numpy(mask_arr).float().unsqueeze(0).unsqueeze(0) / 255.0  # (1,1,H,W)
 
-        # Generate cfg.num_samples_lfs candidates
+        # Force at least 1 sample to avoid crashing if you set it to 0
+        num_samples = max(1, cfg.num_samples_lfs) 
+        
         candidates = []
-        for s in range(cfg.num_samples_lfs):
+        candidate_heatmaps = [] 
+        
+        for s in range(num_samples):
             gen = torch.Generator(device=device).manual_seed(cfg.seed + global_idx * 100 + s)
-            gen_img = generate_with_blended_latents(
+            
+            gen_img, heatmap = generate_with_blended_latents(
                 pipe=pipe,
                 good_image=good_tensor.squeeze(0),
                 mask=mask_tensor.squeeze(0),
@@ -434,35 +463,60 @@ def generate(cfg: GenerationConfig):
                 generator=gen,
                 device=device,
                 weight_dtype=weight_dtype,
+                placeholder_token=cfg.placeholder_token,
             )
             candidates.append(gen_img.unsqueeze(0))   # (1,3,H,W)
+            candidate_heatmaps.append(heatmap)
 
-        # Low-Fidelity Selection
-        best_img, best_idx, best_score = low_fidelity_selection(
-            lpips_fn=lpips_fn,
-            generated_images=candidates,
-            original_image=good_tensor.to(device),
-            mask=mask_tensor.to(device),
-        )
+        # -------------------------------------------------------------
+        # NEW: Bypass LFS entirely if we only generated 1 sample
+        # -------------------------------------------------------------
+        if num_samples > 1:
+            best_img, best_idx, best_score = low_fidelity_selection(
+                lpips_fn=lpips_fn,
+                generated_images=candidates,
+                original_image=good_tensor.to(device),
+                mask=mask_tensor.to(device),
+            )
+            best_heatmap = candidate_heatmaps[best_idx]
+            logger.debug(f"[{global_idx:04d}] {img_path.name}: selected sample {best_idx} (LPIPS={best_score:.4f})")
+        else:
+            # We only have one image, so it wins by default!
+            best_img = candidates[0]
+            best_heatmap = candidate_heatmaps[0]
+            logger.debug(f"[{global_idx:04d}] {img_path.name}: LFS bypassed (single sample)")
 
-        # Extract the stems for both background and mask
+        # -------------------------------------------------------------
+        # File Saving Logic
+        # -------------------------------------------------------------
         bg_stem = Path(img_path).stem
         mask_stem = Path(mask_path).stem if mask_path is not None else "random"
 
-        # Create the comprehensive filename
         out_img_name = f"{bg_stem}_WITH_{mask_stem}_defect_{global_idx:04d}.png"
         out_img_path = os.path.join(cfg.output_dir, out_img_name)
-
         out_mask_path = os.path.join(cfg.output_dir, f"{bg_stem}_WITH_{mask_stem}_mask_{global_idx:04d}.png")
         
         # Save best image and its mask
         save_image(best_img.squeeze(0).cpu(), out_img_path)
         mask_pil.save(out_mask_path)
+        
+        # Plot and save the attention map overlay
+        if best_heatmap is not None:
+            # 1. Save the pure heatmap (no background, full opacity)
+            heatmap_out_path = os.path.join(cfg.output_dir, f"{bg_stem}_WITH_{mask_stem}_heatmap_{global_idx:04d}.png")
+            plt.imsave(heatmap_out_path, best_heatmap, cmap='jet')
 
-        logger.debug(
-            f"[{global_idx:04d}] {img_path.name}: "
-            f"selected sample {best_idx} (LPIPS={best_score:.4f})"
-        )
+            # 2. Save the overlay context (original image + semi-transparent heatmap)
+            plt.figure(figsize=(6, 6))
+            plt.imshow(img_pil) # Using original unmodified image as base 
+            plt.imshow(best_heatmap, cmap='jet', alpha=0.55)
+            plt.title(f"Attention Map for '{cfg.placeholder_token}'")
+            plt.axis('off')
+            
+            overlay_out_path = os.path.join(cfg.output_dir, f"{bg_stem}_WITH_{mask_stem}_overlay_{global_idx:04d}.png")
+            plt.savefig(overlay_out_path, bbox_inches='tight', dpi=150)
+            plt.close()
+
         global_idx += 1
 
     logger.info(f"Generated {global_idx} defect images → '{cfg.output_dir}'")
