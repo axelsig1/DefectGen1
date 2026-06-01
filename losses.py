@@ -95,7 +95,8 @@ class AttnProbeProcessor:
 
         # Store cross-attention maps only (not self-attention)
         if is_cross:
-            self.store.append(attn_probs.detach())
+            #self.store.append(attn_probs)         # Removing .detach() causes overfitting fast!
+            self.store.append(attn_probs.detach()) # Including .detach() attn loss isn't working correctly?
 
         # Weighted sum over value vectors
         hidden_states = torch.bmm(attn_probs, value)

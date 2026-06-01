@@ -123,6 +123,7 @@ def _load_mask(path: Path, size: int) -> Image.Image:
     # re-binarise with low threshold
     mask_arr = np.array(mask, dtype=np.float32) / 255.0
     binary = (mask_arr > MASK_BINARISE_THRESHOLD).astype(np.uint8) * 255
+
     return Image.fromarray(binary, mode="L")
 
 

@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
+#SBATCH -A NAISS2026-4-280
+#SBATCH --gpus-per-node=A100:1
+#SBATCH -t 0-02:00:00              # Set to 2 hours based on your interactive salloc request
+#SBATCH -J defectfill_train
+#SBATCH --output=/mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/logs/test_fix_defectfill_1_train_%j.out
+
 
 # =============================================================================
-# DefectFill — Slurm Batch Generation Job
+# DefectFill — Slurm Batch Train Job
+# Account: NAISS2026-4-280  |  GPU: A40  |  Env: defectgen_env
 # =============================================================================
 
 
@@ -37,13 +44,20 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:'
 # -----------------------------------------------------------------------------
 # Run training
 # -----------------------------------------------------------------------------
+
+# --data_root        $DATA/cwp_pipeline_ready/genai/train \
+
+#    --unet_lr          2e-4 \
+#    --text_encoder_lr  4e-5 \
+
 python -u train.py \
-    --data_root        $DATA/cwp_dataset \
-    --defect_type      obj2 \
-    --object_name      "rough textured dark grayscale metallic surface" \
-    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output/cwp_uv_model_3\
+    --data_root        /mimer/NOBACKUP/groups/cast_fm/axel/_ARCHIVE/Data/MVTec_new/hazelnut/train \
+    --defect_type      crack2 \
+    --object_name      "hazelnut" \
+    --output_dir       /mimer/NOBACKUP/groups/cast_fm/axel/Models/DefectGen1_output/output_attn_fix/hazelnut_default_1 \
     --pretrained_model_name sd2-community/stable-diffusion-2-inpainting \
-    --train_steps      2500 \
+    --train_steps      2000 \
+    --train_fraction   0.9 \
     --save_steps       250 \
     --batch_size       4 \
     --unet_lr          2e-4 \
@@ -53,7 +67,7 @@ python -u train.py \
     --lora_dropout     0.1 \
     --lambda_def       1.0 \
     --lambda_obj       0.1 \
-    --lambda_attn      0.025 \
+    --lambda_attn      0.1 \
     --alpha            0.3 \
     --warmup_steps     100 \
     --mixed_precision  bf16 \
